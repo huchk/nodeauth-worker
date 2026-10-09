@@ -33473,7 +33473,7 @@ var init_url = __esm({
 
 // node_modules/nodemailer/dist/esm/fetch/cookies.js
 import net2 from "node:net";
-var SESSION_TIMEOUT, Cookies;
+var SESSION_TIMEOUT, Cookies, cookies_default;
 var init_cookies = __esm({
   "node_modules/nodemailer/dist/esm/fetch/cookies.js"() {
     init_url();
@@ -33553,15 +33553,24 @@ var init_cookies = __esm({
        */
       parse(cookieStr) {
         const cookie = {};
+        let hasNameValue = false;
         (cookieStr || "").toString().split(";").forEach((cookiePart) => {
-          const valueParts = cookiePart.split("=");
-          const key = valueParts.shift().trim().toLowerCase();
-          let value = valueParts.join("=").trim();
-          let domain;
-          if (!key) {
+          if (!cookiePart.trim()) {
             return;
           }
-          switch (key) {
+          const valueParts = cookiePart.split("=");
+          const name2 = valueParts.shift().trim();
+          let value = valueParts.join("=").trim();
+          let domain;
+          if (!hasNameValue) {
+            hasNameValue = true;
+            if (name2) {
+              cookie.name = name2;
+              cookie.value = value;
+            }
+            return;
+          }
+          switch (name2.toLowerCase()) {
             case "expires": {
               const expires = new Date(value);
               if (expires.toString() !== "Invalid Date") {
@@ -33588,11 +33597,6 @@ var init_cookies = __esm({
             case "httponly":
               cookie.httponly = true;
               break;
-            default:
-              if (!cookie.name) {
-                cookie.name = key;
-                cookie.value = value;
-              }
           }
         });
         return cookie;
@@ -33681,6 +33685,7 @@ var init_cookies = __esm({
         return path7;
       }
     };
+    cookies_default = Cookies;
   }
 });
 
@@ -33689,16 +33694,16 @@ var name, version5, homepage;
 var init_package_info = __esm({
   "node_modules/nodemailer/dist/esm/package-info.js"() {
     name = "nodemailer";
-    version5 = "10.0.5";
+    version5 = "10.0.16";
     homepage = "https://nodemailer.com/";
   }
 });
 
 // node_modules/nodemailer/dist/esm/errors.js
-var ETLS, ENOAUTH, EOAUTH2, EMAXLIMIT, EMAXRECIPIENTS, ESENDMAIL, ESES, ECONFIG, EPROXY, EFILEACCESS, EURLACCESS, EFETCH;
+var ECONNECTION, ENOAUTH, EOAUTH2, EMAXLIMIT, EMAXRECIPIENTS, ESENDMAIL, ESES, ECONFIG, EPROXY, EFILEACCESS, EURLACCESS, EFETCH;
 var init_errors3 = __esm({
   "node_modules/nodemailer/dist/esm/errors.js"() {
-    ETLS = "ETLS";
+    ECONNECTION = "ECONNECTION";
     ENOAUTH = "ENOAUTH";
     EOAUTH2 = "EOAUTH2";
     EMAXLIMIT = "EMAXLIMIT";
@@ -33751,7 +33756,7 @@ function parseFetchUrl(url) {
 function nmfetch(url, options) {
   options = options || {};
   options.fetchRes = options.fetchRes || new PassThrough3();
-  options.cookies = options.cookies || new Cookies();
+  options.cookies = options.cookies || new cookies_default();
   options.redirects = options.redirects || 0;
   options.maxRedirects = isNaN(options.maxRedirects) ? MAX_REDIRECTS : options.maxRedirects;
   const fetchRes = options.fetchRes;
@@ -33825,14 +33830,11 @@ function nmfetch(url, options) {
             return encodeURIComponent(key) + "=" + encodeURIComponent(value);
           }).join("&"));
         } catch (E) {
-          if (finished) {
-            return void 0;
-          }
           finished = true;
           E.code = EFETCH;
           E.sourceUrl = url;
-          fetchRes.emit("error", E);
-          return void 0;
+          setImmediate(() => fetchRes.emit("error", E));
+          return fetchRes;
         }
       } else {
         body = Buffer.from(options.body.toString().trim());
@@ -33876,28 +33878,21 @@ function nmfetch(url, options) {
     });
     return fetchRes;
   }
-  if (options.timeout) {
-    req.setTimeout(options.timeout, () => {
-      if (finished) {
-        return;
-      }
-      finished = true;
-      req.abort();
-      const err = new Error("Request Timeout");
-      err.code = EFETCH;
-      err.sourceUrl = url;
-      fetchRes.emit("error", err);
-    });
-  }
-  req.on("error", (err) => {
+  const fail = (err, sourceUrl = url) => {
     if (finished) {
       return;
     }
     finished = true;
     err.code = EFETCH;
-    err.sourceUrl = url;
+    err.sourceUrl = sourceUrl;
     fetchRes.emit("error", err);
-  });
+    req.abort();
+  };
+  const timeout = typeof options.timeout === "number" && options.timeout >= 0 ? options.timeout : DEFAULT_TIMEOUT2;
+  if (timeout) {
+    req.setTimeout(timeout, () => fail(new Error("Request Timeout")));
+  }
+  req.on("error", (err) => fail(err));
   req.on("response", (res) => {
     let inflate;
     if (finished) {
@@ -33917,13 +33912,7 @@ function nmfetch(url, options) {
     if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
       options.redirects++;
       if (options.redirects > options.maxRedirects) {
-        finished = true;
-        const err = new Error("Maximum redirect count exceeded");
-        err.code = EFETCH;
-        err.sourceUrl = url;
-        fetchRes.emit("error", err);
-        req.abort();
-        return;
+        return fail(new Error("Maximum redirect count exceeded"));
       }
       options.method = "GET";
       options.body = false;
@@ -33935,13 +33924,7 @@ function nmfetch(url, options) {
       }
       const redirectParsed = parseFetchUrl(redirectUrl);
       if (!redirectParsed) {
-        finished = true;
-        const err = new Error("Unsupported protocol for URL " + redirectUrl);
-        err.code = EFETCH;
-        err.sourceUrl = redirectUrl;
-        fetchRes.emit("error", err);
-        req.abort();
-        return;
+        return fail(new Error("Unsupported protocol for URL " + redirectUrl), redirectUrl);
       }
       const crossHost = redirectParsed.hostname !== parsed.hostname;
       const downgrade = parsed.protocol === "https:" && redirectParsed.protocol === "http:";
@@ -33953,41 +33936,31 @@ function nmfetch(url, options) {
           }
         });
       }
+      finished = true;
+      res.resume();
+      req.abort();
       return nmfetch(redirectUrl, options);
     }
     fetchRes.statusCode = res.statusCode;
     fetchRes.headers = res.headers;
     if (res.statusCode >= 300 && !options.allowErrorResponse) {
-      finished = true;
-      const err = new Error("Invalid status code " + res.statusCode);
-      err.code = EFETCH;
-      err.sourceUrl = url;
-      fetchRes.emit("error", err);
-      req.abort();
-      return;
+      return fail(new Error("Invalid status code " + res.statusCode));
     }
-    res.on("error", (err) => {
-      if (finished) {
+    res.on("error", (err) => fail(err));
+    const maxBytes = typeof options.maxBytes === "number" && options.maxBytes > 0 ? options.maxBytes : DEFAULT_MAX_BYTES;
+    const source = inflate || res;
+    let received = 0;
+    source.on("data", (chunk) => {
+      received += chunk.length;
+      if (received <= maxBytes || finished) {
         return;
       }
-      finished = true;
-      err.code = EFETCH;
-      err.sourceUrl = url;
-      fetchRes.emit("error", err);
-      req.abort();
+      source.unpipe(fetchRes);
+      fail(new Error("Response size exceeds the allowed " + maxBytes + " bytes"));
     });
     if (inflate) {
       res.pipe(inflate).pipe(fetchRes);
-      inflate.on("error", (err) => {
-        if (finished) {
-          return;
-        }
-        finished = true;
-        err.code = EFETCH;
-        err.sourceUrl = url;
-        fetchRes.emit("error", err);
-        req.abort();
-      });
+      inflate.on("error", (err) => fail(err));
     } else {
       res.pipe(fetchRes);
     }
@@ -34000,18 +33973,14 @@ function nmfetch(url, options) {
         }
         req.write(body);
       } catch (err) {
-        finished = true;
-        err.code = EFETCH;
-        err.sourceUrl = url;
-        fetchRes.emit("error", err);
-        return;
+        return fail(err);
       }
     }
     req.end();
   });
   return fetchRes;
 }
-var MAX_REDIRECTS, TLS_OPTION_KEYS, fetch_default;
+var MAX_REDIRECTS, DEFAULT_TIMEOUT2, DEFAULT_MAX_BYTES, TLS_OPTION_KEYS, fetch_default;
 var init_fetch = __esm({
   "node_modules/nodemailer/dist/esm/fetch/index.js"() {
     init_url();
@@ -34020,6 +33989,8 @@ var init_fetch = __esm({
     init_errors3();
     init_objects();
     MAX_REDIRECTS = 5;
+    DEFAULT_TIMEOUT2 = 60 * 1e3;
+    DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
     TLS_OPTION_KEYS = [
       "ALPNProtocols",
       "ca",
@@ -34043,7 +34014,8 @@ var init_fetch = __esm({
       "sessionIdContext",
       "sigalgs"
     ];
-    nmfetch.Cookies = Cookies;
+    nmfetch.Cookies = cookies_default;
+    nmfetch.DEFAULT_TIMEOUT = DEFAULT_TIMEOUT2;
     fetch_default = nmfetch;
   }
 });
@@ -34463,8 +34435,9 @@ var init_shared = __esm({
       }
       const logger3 = options.logger === true ? createDefaultLogger(levels) : options.logger;
       levels.forEach((level) => {
-        response[level] = (data, message, ...args) => {
-          _logFunc(logger3, level, defaults2, data, message, ...args);
+        response[level] = (...args) => {
+          const data = typeof args[0] === "string" ? void 0 : args.shift();
+          _logFunc(logger3, level, defaults2, data, ...args);
         };
       });
       return response;
@@ -36686,7 +36659,7 @@ function encode6(buffer2) {
 }
 function wrap3(str, lineLength) {
   str = (str || "").toString();
-  lineLength = lineLength || 76;
+  lineLength = Math.max(Number(lineLength) || 76, 1);
   if (str.length <= lineLength) {
     return str;
   }
@@ -36797,7 +36770,7 @@ function encode7(buffer2) {
 }
 function wrap4(str, lineLength) {
   str = (str || "").toString();
-  lineLength = lineLength || 76;
+  lineLength = Math.max(Number(lineLength) || 76, MIN_LINE_LENGTH);
   if (str.length <= lineLength) {
     return str;
   }
@@ -36842,6 +36815,9 @@ function wrap4(str, lineLength) {
         }
       }
     }
+    if (!line2.length) {
+      line2 = str.substr(pos, lineLength);
+    }
     if (pos + line2.length < len && line2.substr(-1) !== "\n") {
       if (line2.length === lineLength && line2.match(/[=][\da-f]{2}$/i)) {
         line2 = line2.substr(0, line2.length - 3);
@@ -36872,9 +36848,10 @@ function checkRanges(nr, ranges) {
   }
   return false;
 }
-var QP_RANGES, Encoder2;
+var MIN_LINE_LENGTH, QP_RANGES, Encoder2;
 var init_qp = __esm({
   "node_modules/nodemailer/dist/esm/qp/index.js"() {
+    MIN_LINE_LENGTH = 4;
     QP_RANGES = [
       [9],
       // <TAB>
@@ -36969,7 +36946,7 @@ function encodeWord(data, mimeWordEncoding, maxLength) {
       return "=" + (ord.length === 1 ? "0" + ord : ord);
     });
   } else if (mimeWordEncoding === "B") {
-    encodedStr = typeof data === "string" ? data : encode6(data);
+    encodedStr = typeof data === "string" ? data : data.toString("utf-8");
     maxLength = maxLength ? Math.max(3, (maxLength - maxLength % 4) / 4 * 3) : 0;
   }
   if (maxLength && (mimeWordEncoding !== "B" ? encodedStr : encode6(data)).length > maxLength) {
@@ -37036,7 +37013,7 @@ function buildHeaderValue(structured) {
           paramsArray.push(encodedParam.key + "=" + JSON.stringify(encodedParam.value));
         }
       });
-    } else if (/[\s'"\\;:/=(),<>@[\]?]|^-/.test(value2)) {
+    } else if (!value2.length || /[\s'"\\;:/=(),<>@[\]?]|^-/.test(value2)) {
       paramsArray.push(param + "=" + JSON.stringify(value2));
     } else {
       paramsArray.push(param + "=" + value2);
@@ -37144,107 +37121,149 @@ function buildHeaderParam(key, data, maxLength) {
     value: item.line
   }));
 }
+function _isParamName(name2) {
+  return !!name2 && !isProtoKey(name2);
+}
 function parseHeaderValue(str) {
   const response = {
-    value: false,
+    value: "",
     params: {}
   };
   const setParam = (name2, value2) => {
-    if (!isProtoKey(name2)) {
+    name2 = name2.toLowerCase();
+    if (_isParamName(name2) && !Object.prototype.hasOwnProperty.call(response.params, name2)) {
       response.params[name2] = value2;
     }
   };
   let key = false;
   let value = "";
-  let type = "value";
+  let stage = "value";
   let quote = false;
   let escaped = false;
   let chr;
+  let pendingSpace = "";
+  let quoteClosed = false;
+  const flushSpace = () => {
+    if (value.length) {
+      value += pendingSpace;
+    }
+    pendingSpace = "";
+  };
+  const addChr = (c) => {
+    flushSpace();
+    value += c;
+  };
+  const takeValue = () => {
+    const taken = value;
+    value = "";
+    pendingSpace = "";
+    quoteClosed = false;
+    return taken;
+  };
+  const storeValue = () => {
+    const taken = takeValue();
+    if (key === false) {
+      response.value = taken;
+    } else {
+      setParam(key, taken);
+    }
+  };
+  const storeEmptyKey = () => {
+    setParam(takeValue().trim(), "");
+  };
   for (let i2 = 0, len = str.length; i2 < len; i2++) {
     chr = str.charAt(i2);
-    if (type === "key") {
+    if (stage === "key") {
       if (chr === "=") {
-        key = value.trim().toLowerCase();
-        type = "value";
-        value = "";
+        key = takeValue().trim();
+        stage = "value";
+        continue;
+      }
+      if (chr === ";") {
+        storeEmptyKey();
         continue;
       }
       value += chr;
     } else {
+      if (quoteClosed && chr !== ";") {
+        escaped = false;
+        continue;
+      }
       if (escaped) {
-        value += chr;
-      } else if (chr === "\\") {
+        addChr(chr);
+      } else if (quote && chr === "\\") {
         escaped = true;
         continue;
       } else if (quote && chr === quote) {
         quote = false;
+        quoteClosed = true;
       } else if (!quote && chr === '"') {
         quote = chr;
+        flushSpace();
       } else if (!quote && chr === ";") {
-        if (key === false) {
-          response.value = value.trim();
-        } else {
-          setParam(key, value.trim());
-        }
-        type = "key";
-        value = "";
+        storeValue();
+        stage = "key";
+      } else if (!quote && (chr === " " || chr === "	")) {
+        pendingSpace += chr;
       } else {
-        value += chr;
+        addChr(chr);
       }
       escaped = false;
     }
   }
-  if (type === "value") {
-    if (key === false) {
-      response.value = value.trim();
-    } else {
-      setParam(key, value.trim());
-    }
-  } else if (value.trim()) {
-    setParam(value.trim().toLowerCase(), "");
+  if (stage === "value") {
+    storeValue();
+  } else {
+    storeEmptyKey();
   }
+  const continuations = /* @__PURE__ */ new Map();
   Object.keys(response.params).forEach((key2) => {
-    let actualKey, nr, match3, value2;
-    if (match3 = key2.match(/(\*(\d+)|\*(\d+)\*|\*)$/)) {
-      actualKey = key2.substr(0, match3.index);
-      nr = Number(match3[2] || match3[3]) || 0;
-      if (isProtoKey(actualKey)) {
-        delete response.params[key2];
-        return;
-      }
-      if (!response.params[actualKey] || typeof response.params[actualKey] !== "object") {
-        response.params[actualKey] = {
-          charset: false,
-          values: []
-        };
-      }
-      value2 = response.params[key2];
-      if (nr === 0 && match3[0].substr(-1) === "*" && (match3 = value2.match(/^([^']*)'[^']*'(.*)$/))) {
-        response.params[actualKey].charset = match3[1] || "iso-8859-1";
-        value2 = match3[2];
-      }
-      response.params[actualKey].values[nr] = value2;
-      delete response.params[key2];
+    const match3 = key2.match(/(\*(\d+)|\*(\d+)\*|\*)$/);
+    if (!match3) {
+      return;
     }
+    const actualKey = key2.substr(0, match3.index);
+    const nr = Number(match3[2] || match3[3]) || 0;
+    const encoded = match3[0].substr(-1) === "*";
+    let value2 = response.params[key2];
+    delete response.params[key2];
+    if (!_isParamName(actualKey)) {
+      return;
+    }
+    let continuation = continuations.get(actualKey);
+    if (!continuation) {
+      continuation = { charset: false, sections: [] };
+      continuations.set(actualKey, continuation);
+    }
+    const charsetMatch = nr === 0 && encoded ? value2.match(/^([^']*)'[^']*'(.*)$/) : null;
+    if (charsetMatch) {
+      continuation.charset = TOKEN.test(charsetMatch[1]) ? charsetMatch[1] : "iso-8859-1";
+      value2 = charsetMatch[2];
+    }
+    continuation.sections.push({ nr, value: value2, encoded });
   });
-  Object.keys(response.params).forEach((key2) => {
-    let value2;
-    if (response.params[key2] && Array.isArray(response.params[key2].values)) {
-      value2 = response.params[key2].values.map((val) => val || "").join("");
-      if (response.params[key2].charset) {
-        response.params[key2] = "=?" + response.params[key2].charset + "?Q?" + value2.replace(/[=?_\s]/g, (s2) => {
-          const c = s2.charCodeAt(0).toString(16);
-          if (s2 === " ") {
-            return "_";
-          }
-          return "%" + (c.length < 2 ? "0" : "") + c;
-        }).replace(/%/g, "=") + "?=";
-      } else {
-        response.params[key2] = value2;
-      }
+  continuations.forEach((continuation, key2) => {
+    if (Object.prototype.hasOwnProperty.call(response.params, key2)) {
+      return;
     }
+    continuation.sections.sort((a, b) => a.nr - b.nr);
+    if (!continuation.charset) {
+      response.params[key2] = continuation.sections.map((section) => section.value).join("");
+      return;
+    }
+    response.params[key2] = "=?" + continuation.charset + "?Q?" + continuation.sections.map(_encodeContinuationSection).join("") + "?=";
   });
   return response;
+}
+function _encodeContinuationSection(section) {
+  const specials = section.encoded ? /[=?_\s]/g : /[=?_\s%]/g;
+  return section.value.replace(specials, (s2) => {
+    const c = s2.charCodeAt(0).toString(16);
+    if (s2 === " ") {
+      return "_";
+    }
+    return "%" + (c.length < 2 ? "0" : "") + c;
+  }).replace(/%/g, "=");
 }
 function detectExtension2(mimeType) {
   return detectExtension(mimeType);
@@ -37336,12 +37355,14 @@ function safeEncodeURIComponent(str) {
   }
   return str.replace(/[\x00-\x1F *'()<>@,;:\\"[\]?=\u007F-\uFFFF]/g, (chr) => encodeURICharComponent(chr));
 }
+var TOKEN;
 var init_mime_funcs = __esm({
   "node_modules/nodemailer/dist/esm/mime-funcs/index.js"() {
     init_base64();
     init_qp();
     init_mime_types();
     init_objects();
+    TOKEN = /^[^\x00-\x20\x7f()<>@,;:\\"/[\]?=]+$/;
   }
 });
 
@@ -37356,6 +37377,71 @@ function _quoteLocalPart(address) {
     return address;
   }
   return '"' + user.replace(/["\\]/g, "\\$&") + '"@' + address.substr(lastAt + 1);
+}
+function _isSpaceCode(code) {
+  return code === 32 || code >= 9 && code <= 13 || code === 160 || code === 5760 || code >= 8192 && code <= 8202 || code === 8232 || code === 8233 || code === 8239 || code === 8287 || code === 12288 || code === 65279;
+}
+function _isWordCode(code) {
+  return code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122 || code === 95;
+}
+function _isBoundary(text4, at) {
+  return _isWordCode(text4.charCodeAt(at - 1)) !== _isWordCode(text4.charCodeAt(at));
+}
+function _indexOfAt(text4, from14, to) {
+  for (let i2 = from14; i2 < to; i2++) {
+    if (text4.charCodeAt(i2) === 64) {
+      return i2;
+    }
+  }
+  return -1;
+}
+function _looseAddressStart(text4) {
+  const len = text4.length;
+  let pos = 0;
+  while (pos < len) {
+    while (pos < len && _isSpaceCode(text4.charCodeAt(pos))) {
+      pos++;
+    }
+    if (pos >= len) {
+      break;
+    }
+    const runStart = pos;
+    let runEnd = pos;
+    while (runEnd < len && !_isSpaceCode(text4.charCodeAt(runEnd))) {
+      runEnd++;
+    }
+    let at = _indexOfAt(text4, runStart, runEnd);
+    if (at >= 0) {
+      let lastBoundary = -1;
+      for (let k = runEnd; k > runStart; k--) {
+        if (_isBoundary(text4, k)) {
+          lastBoundary = k;
+          break;
+        }
+      }
+      let atomStart = runStart;
+      while (lastBoundary >= 0 && at >= 0) {
+        if (at > atomStart && runEnd > at + 1 && lastBoundary > at + 1) {
+          for (let start = atomStart; start < at; start++) {
+            if (_isBoundary(text4, start)) {
+              if (start > runStart) {
+                return start;
+              }
+              let padded = runStart;
+              while (padded > 0 && _isSpaceCode(text4.charCodeAt(padded - 1))) {
+                padded--;
+              }
+              return padded;
+            }
+          }
+        }
+        atomStart = at + 1;
+        at = _indexOfAt(text4, atomStart, runEnd);
+      }
+    }
+    pos = runEnd;
+  }
+  return -1;
 }
 function _recoverAddrSpec(data) {
   if (!HAS_WHITESPACE.test(data.address)) {
@@ -37387,6 +37473,58 @@ function _recoverAddrSpec(data) {
   }
   data.address = address;
   data.text = [data.text].concat(rest).filter((part) => part).join(" ");
+}
+function _stripAddressComments(address) {
+  const comments = [];
+  let result = "";
+  let comment = "";
+  let depth = 0;
+  let closer = "";
+  let lastChar = "";
+  for (let i2 = 0, len = address.length; i2 < len; i2++) {
+    const chr = address.charAt(i2);
+    if (depth) {
+      if (chr === "\\" && i2 < len - 1) {
+        comment += address.charAt(++i2);
+      } else if (chr === "(") {
+        depth++;
+        comment += chr;
+      } else if (chr === ")" && !--depth) {
+        comments.push(comment.trim());
+        comment = "";
+        if (lastChar !== "@" && address.charAt(i2 + 1) !== "@") {
+          result += " ";
+          lastChar = " ";
+        }
+      } else {
+        comment += chr;
+      }
+      continue;
+    }
+    if (closer) {
+      if (chr === "\\" && closer === '"' && i2 < len - 1) {
+        result += chr + address.charAt(++i2);
+        lastChar = address.charAt(i2);
+        continue;
+      }
+      if (chr === closer) {
+        closer = "";
+      }
+    } else if (chr === '"') {
+      closer = '"';
+    } else if (chr === "[") {
+      closer = "]";
+    } else if (chr === "(") {
+      depth = 1;
+      continue;
+    }
+    result += chr;
+    lastChar = chr;
+  }
+  if (depth) {
+    comments.push(comment.trim());
+  }
+  return { address: result.trim(), comments: comments.filter((text4) => text4) };
 }
 function _handleAddress(tokens, depth) {
   let isGroup = false;
@@ -37429,6 +37567,8 @@ function _handleAddress(tokens, depth) {
           break;
       }
     } else if (token.value) {
+      const prevPrevToken = i2 > 1 ? tokens[i2 - 2] : null;
+      const opensAfterEmptyQuotedString = prevToken?.type === "operator" && prevToken.value === '"' && !!prevToken.noBreak && prevPrevToken?.type === "operator" && prevPrevToken.value === '"';
       if (state === "address") {
         token.value = token.value.replace(/^[^<]*<\s*/, "");
       }
@@ -37446,7 +37586,7 @@ function _handleAddress(tokens, depth) {
         data[state].push(token.value);
         lastChars[state] = token.value.charAt(token.value.length - 1);
         if (state === "text") {
-          data.textWasQuoted.push(insideQuotes);
+          data.textWasQuoted.push(insideQuotes || opensAfterEmptyQuotedString);
         }
       }
     }
@@ -37459,7 +37599,7 @@ function _handleAddress(tokens, depth) {
     data.text = data.text.join(" ");
     let groupMembers = [];
     if (data.group.length) {
-      const parsedGroup = addressparser(data.group.join(","), { _depth: depth + 1 });
+      const parsedGroup = _parseAddressList(data.group.join(","), depth + 1);
       parsedGroup.forEach((member) => {
         if (member.group) {
           groupMembers = groupMembers.concat(member.group);
@@ -37473,6 +37613,22 @@ function _handleAddress(tokens, depth) {
       group: groupMembers
     });
   } else {
+    const addressComments = [];
+    const addressParts = [];
+    for (const part of data.address) {
+      if (part.indexOf("(") < 0) {
+        addressParts.push(part);
+        continue;
+      }
+      const stripped = _stripAddressComments(part);
+      for (const comment of stripped.comments) {
+        addressComments.push(comment);
+      }
+      if (stripped.address) {
+        addressParts.push(stripped.address);
+      }
+    }
+    data.address = addressParts;
     if (!data.address.length && data.text.length) {
       for (let i2 = data.text.length - 1; i2 >= 0; i2--) {
         if (!data.textWasQuoted[i2] && ADDR_SPEC.test(data.text[i2])) {
@@ -37485,14 +37641,19 @@ function _handleAddress(tokens, depth) {
         let extracted = false;
         for (let i2 = data.text.length - 1; i2 >= 0; i2--) {
           if (!data.textWasQuoted[i2]) {
-            data.text[i2] = data.text[i2].replace(/\s*\b[^@\s]+@[^\s]+\b\s*/, (match3) => {
-              if (!extracted) {
-                data.address = [match3.trim()];
+            const part = data.text[i2];
+            let remainder = part;
+            const at = _looseAddressStart(part);
+            if (at >= 0) {
+              LOOSE_TEXT_ADDR.lastIndex = at;
+              const match3 = LOOSE_TEXT_ADDR.exec(part);
+              if (match3) {
+                data.address = [match3[0].trim()];
                 extracted = true;
-                return " ";
+                remainder = part.slice(0, at) + " " + part.slice(at + match3[0].length);
               }
-              return match3;
-            }).trim();
+            }
+            data.text[i2] = remainder.trim();
             if (extracted) {
               break;
             }
@@ -37510,7 +37671,14 @@ function _handleAddress(tokens, depth) {
     const addressFromQuotedText = !data.address.length && data.textWasQuoted.some((wasQuoted) => wasQuoted);
     data.text = data.text.join(" ");
     data.address = data.address.join(" ");
+    if (addressFromQuotedText && data.text.indexOf("@") >= 0) {
+      data.address = _quoteLocalPart(data.text);
+      data.text = "";
+    }
     _recoverAddrSpec(data);
+    if (!data.text && addressComments.length) {
+      data.text = addressComments.join(" ");
+    }
     const address = {
       address: data.address || data.text || "",
       name: data.text || data.address || ""
@@ -37522,16 +37690,11 @@ function _handleAddress(tokens, depth) {
         address.address = "";
       }
     }
-    if (addressFromQuotedText && address.address) {
-      address.address = _quoteLocalPart(address.address);
-    }
     addresses.push(address);
   }
   return addresses;
 }
-function addressparser(str, options) {
-  options = options || {};
-  const depth = options._depth || 0;
+function _parseAddressList(str, depth) {
   if (depth > MAX_NESTED_GROUP_DEPTH) {
     return [];
   }
@@ -37539,7 +37702,7 @@ function addressparser(str, options) {
   const tokens = tokenizer.tokenize();
   const addresses = [];
   let address = [];
-  let parsedAddresses = [];
+  const parsedAddresses = [];
   tokens.forEach((token) => {
     if (token.type === "operator" && (token.value === "," || token.value === ";")) {
       if (address.length) {
@@ -37570,8 +37733,11 @@ function addressparser(str, options) {
     }
   }
   mergedAddresses.reverse();
-  parsedAddresses = mergedAddresses;
-  if (options.flatten) {
+  return mergedAddresses;
+}
+function addressparser(str, options) {
+  const parsedAddresses = _parseAddressList(str, 0);
+  if (options?.flatten) {
     const flatAddresses = [];
     const walkAddressList = (list) => {
       list.forEach((entry) => {
@@ -37586,13 +37752,14 @@ function addressparser(str, options) {
   }
   return parsedAddresses;
 }
-var HAS_WHITESPACE, QUOTED_LOCAL_ADDR, ADDR_SPEC, LOOSE_ADDR_SPEC, Tokenizer, MAX_NESTED_GROUP_DEPTH;
+var HAS_WHITESPACE, QUOTED_LOCAL_ADDR, ADDR_SPEC, LOOSE_ADDR_SPEC, LOOSE_TEXT_ADDR, Tokenizer, MAX_NESTED_GROUP_DEPTH, addressparser_default;
 var init_addressparser = __esm({
   "node_modules/nodemailer/dist/esm/addressparser/index.js"() {
     HAS_WHITESPACE = /\s/;
     QUOTED_LOCAL_ADDR = /^("(?:[^"\\]|\\[\s\S])*"@\S+)(?:\s+([\s\S]+))?$/;
     ADDR_SPEC = /^[^@\s]+@[^@\s]+$/;
     LOOSE_ADDR_SPEC = /^[^@\s]+@\S+$/;
+    LOOSE_TEXT_ADDR = /\s*\b[^@\s]+@[^\s]+\b\s*/y;
     Tokenizer = class {
       constructor(str) {
         this.str = (str || "").toString();
@@ -37601,6 +37768,7 @@ var init_addressparser = __esm({
         this.node = null;
         this.escaped = false;
         this.inDomainLiteral = false;
+        this.afterAt = false;
         this.list = [];
         this.operators = {
           '"': '"',
@@ -37641,10 +37809,11 @@ var init_addressparser = __esm({
        * Checks if a character is an operator or text and acts accordingly
        *
        * @param chr Character from the address field
+       * @param nextChr Character following chr, null at the end of the field
        */
       checkChar(chr, nextChr) {
         if (!this.escaped && !this.operatorExpecting) {
-          if (!this.inDomainLiteral && chr === "[") {
+          if (!this.inDomainLiteral && chr === "[" && this.afterAt) {
             this.inDomainLiteral = true;
           } else if (this.inDomainLiteral && (chr === "]" || chr === "," || chr === ";")) {
             this.inDomainLiteral = false;
@@ -37661,20 +37830,26 @@ var init_addressparser = __esm({
           }
           this.list.push(this.node);
           this.node = null;
+          if (chr !== ")") {
+            this.afterAt = false;
+          }
           this.operatorExpecting = "";
           this.escaped = false;
           return;
-        } else if (!this.operatorExpecting && !this.inDomainLiteral && chr in this.operators) {
+        } else if (!this.operatorExpecting && !(this.inDomainLiteral && chr === ":") && chr in this.operators) {
           this.node = {
             type: "operator",
             value: chr
           };
           this.list.push(this.node);
           this.node = null;
+          if (chr !== "(") {
+            this.afterAt = false;
+          }
           this.operatorExpecting = this.operators[chr];
           this.escaped = false;
           return;
-        } else if (['"', "'"].includes(this.operatorExpecting) && chr === "\\") {
+        } else if (['"', "'", ")"].includes(this.operatorExpecting) && chr === "\\") {
           this.escaped = true;
           return;
         }
@@ -37690,11 +37865,15 @@ var init_addressparser = __esm({
         }
         if (chr.charCodeAt(0) >= 33 || [" ", "	"].includes(chr)) {
           this.node.value += chr;
+          if (!this.operatorExpecting && chr !== " " && chr !== "	") {
+            this.afterAt = chr === "@";
+          }
         }
         this.escaped = false;
       }
     };
     MAX_NESTED_GROUP_DEPTH = 50;
+    addressparser_default = addressparser;
   }
 });
 
@@ -37824,6 +38003,9 @@ function normalizeDomain(domain, toUnicode2) {
   }
   return toUnicode2 ? toUnicode(domain) : toASCII(domain);
 }
+function _stripBoundaryControls(value) {
+  return value.replace(/[\x00-\x1f\x7f]+/g, "");
+}
 var FORMATTED_HEADERS, ATEXT, DOT_ATOM, QUOTED_STRING, PLAIN_ADDRESS, URL_PARSER_UNSAFE, MimeNode, mime_node_default;
 var init_mime_node = __esm({
   "node_modules/nodemailer/dist/esm/mime-node/index.js"() {
@@ -37848,8 +38030,8 @@ var init_mime_node = __esm({
       constructor(contentType, options) {
         this.nodeCounter = 0;
         options = options || {};
-        this.baseBoundary = options.baseBoundary || crypto3.randomBytes(8).toString("hex");
-        this.boundaryPrefix = options.boundaryPrefix || "--_NmP";
+        this.baseBoundary = _stripBoundaryControls(options.baseBoundary || crypto3.randomBytes(8).toString("hex"));
+        this.boundaryPrefix = _stripBoundaryControls(options.boundaryPrefix || "--_NmP");
         this.disableFileAccess = !!options.disableFileAccess;
         this.disableUrlAccess = !!options.disableUrlAccess;
         this.normalizeHeaderKey = options.normalizeHeaderKey;
@@ -38643,7 +38825,7 @@ var init_mime_node = __esm({
             flattened.push(copy);
             continue;
           }
-          const parsed = this._normalizeParsedAddresses(addressparser(address));
+          const parsed = this._normalizeParsedAddresses(addressparser_default(address));
           for (let i2 = 0; i2 < parsed.length; i2++) {
             flattened.push(parsed[i2]);
           }
@@ -38713,7 +38895,8 @@ var init_mime_node = __esm({
         this.contentType = structured.value.trim().toLowerCase();
         this.multipart = /^multipart\//i.test(this.contentType) ? this.contentType.substr(this.contentType.indexOf("/") + 1) : false;
         if (this.multipart) {
-          this.boundary = structured.params.boundary = structured.params.boundary || this.boundary || this._generateBoundary();
+          const declared = _stripBoundaryControls(structured.params.boundary || this.boundary || "");
+          this.boundary = structured.params.boundary = declared || _stripBoundaryControls(this._generateBoundary());
         } else {
           this.boundary = false;
         }
@@ -38725,7 +38908,7 @@ var init_mime_node = __esm({
        * @internal
        */
       _generateBoundary() {
-        return this.rootNode.boundaryPrefix + "-" + this.rootNode.baseBoundary + "-Part_" + this._nodeId;
+        return _stripBoundaryControls(this.rootNode.boundaryPrefix + "-" + this.rootNode.baseBoundary) + "-Part_" + this._nodeId;
       }
       /**
        * Encodes a header value for use in the generated rfc2822 email.
@@ -38791,6 +38974,7 @@ var init_mime_node = __esm({
        *
        * @param addresses An array of address objects
        * @param [uniqueList] An array to be populated with addresses
+       * @param [seenAddresses] Addresses already added to uniqueList, shared with recursive calls to keep deduplication linear
        * @return address string
        * @internal
        */
@@ -38902,7 +39086,7 @@ var init_mime_node = __esm({
       /**
        * If needed, mime encodes the name part
        *
-       * @param name Name part of an address
+       * @param value Name part of an address
        * @returns Mime word encoded string if needed
        * @internal
        */
@@ -39043,7 +39227,7 @@ var init_mail_composer = __esm({
           if (attachment.filename) {
             data.filename = attachment.filename;
           } else if (!isMessageNode && attachment.filename !== false) {
-            data.filename = (attachment.path || attachment.href || "").split("/").pop().split("?").shift() || "attachment-" + (i2 + 1);
+            data.filename = (attachment.path || attachment.href || "").split(/[/\\]/).pop().split("?").shift() || "attachment-" + (i2 + 1);
             if (data.filename.indexOf(".") < 0) {
               data.filename += "." + detectExtension2(data.contentType);
             }
@@ -39448,7 +39632,18 @@ var init_mail_composer = __esm({
 
 // node_modules/nodemailer/dist/esm/dkim/message-parser.js
 import { Transform as Transform6 } from "node:stream";
-var MessageParser;
+function _trimFieldName(str) {
+  let start = 0;
+  let end = str.length;
+  while (start < end && (str.charCodeAt(start) === 32 || str.charCodeAt(start) === 9)) {
+    start++;
+  }
+  while (end > start && (str.charCodeAt(end - 1) === 32 || str.charCodeAt(end - 1) === 9)) {
+    end--;
+  }
+  return str.slice(start, end);
+}
+var MessageParser, message_parser_default;
 var init_message_parser = __esm({
   "node_modules/nodemailer/dist/esm/dkim/message-parser.js"() {
     MessageParser = class extends Transform6 {
@@ -39559,26 +39754,29 @@ var init_message_parser = __esm({
         callback();
       }
       parseHeaders() {
-        const lines = (this.rawHeaders || Buffer.alloc(0)).toString("binary").split(/\r?\n/);
-        for (let i2 = lines.length - 1; i2 > 0; i2--) {
-          if (/^[ \t]/.test(lines[i2])) {
-            lines[i2 - 1] += "\n" + lines[i2];
-            lines.splice(i2, 1);
+        const rawLines = (this.rawHeaders || Buffer.alloc(0)).toString("binary").split(/\r?\n/);
+        const lines = [];
+        for (const rawLine of rawLines) {
+          if (lines.length && /^[ \t]/.test(rawLine)) {
+            lines[lines.length - 1] += "\n" + rawLine;
+          } else {
+            lines.push(rawLine);
           }
         }
         return lines.filter((line2) => /[^ \t\r]/.test(line2)).map((line2) => ({
-          key: line2.substr(0, line2.indexOf(":")).replace(/^[ \t]+|[ \t]+$/g, "").toLowerCase(),
+          key: _trimFieldName(line2.substr(0, line2.indexOf(":"))).toLowerCase(),
           line: line2
         }));
       }
     };
+    message_parser_default = MessageParser;
   }
 });
 
 // node_modules/nodemailer/dist/esm/dkim/relaxed-body.js
 import { Transform as Transform7 } from "node:stream";
 import crypto4 from "node:crypto";
-var CHAR_CR, CHAR_LF, CHAR_SPACE, CHAR_TAB, CRLF, EMPTY_LINES, RelaxedBody;
+var CHAR_CR, CHAR_LF, CHAR_SPACE, CHAR_TAB, CRLF, EMPTY_LINES, RelaxedBody, relaxed_body_default;
 var init_relaxed_body = __esm({
   "node_modules/nodemailer/dist/esm/dkim/relaxed-body.js"() {
     CHAR_CR = 13;
@@ -39698,11 +39896,17 @@ var init_relaxed_body = __esm({
         callback();
       }
     };
+    relaxed_body_default = RelaxedBody;
   }
 });
 
 // node_modules/nodemailer/dist/esm/dkim/sign.js
 import crypto5 from "node:crypto";
+function unsupportedHashAlgoError(hashAlgo) {
+  const err = new Error('Unsupported DKIM hash algorithm "' + hashAlgo + '"');
+  err.code = ECONFIG;
+  return err;
+}
 function sign(headers, hashAlgo, bodyHash, options) {
   options = options || {};
   const defaultFieldNames = "From:Sender:Reply-To:Subject:Date:Message-ID:To:Cc:MIME-Version:Content-Type:Content-Transfer-Encoding:Content-ID:Content-Description:Resent-Date:Resent-From:Resent-Sender:Resent-To:Resent-Cc:Resent-Message-ID:In-Reply-To:References:List-Id:List-Help:List-Unsubscribe:List-Subscribe:List-Post:List-Owner:List-Archive";
@@ -39710,7 +39914,12 @@ function sign(headers, hashAlgo, bodyHash, options) {
   const canonicalizedHeaderData = relaxedHeaders(headers, fieldNames, options.skipFields);
   const dkimHeader = generateDKIMHeader(options.domainName, options.keySelector, canonicalizedHeaderData.fieldNames, hashAlgo, bodyHash);
   canonicalizedHeaderData.headers += "dkim-signature:" + relaxedHeaderLine(dkimHeader);
-  const signer = crypto5.createSign(("rsa-" + hashAlgo).toUpperCase());
+  let signer;
+  try {
+    signer = crypto5.createSign(("rsa-" + hashAlgo).toUpperCase());
+  } catch (_E) {
+    throw unsupportedHashAlgoError(hashAlgo);
+  }
   signer.update(canonicalizedHeaderData.headers, "latin1");
   let signature;
   try {
@@ -39771,7 +39980,9 @@ var init_sign = __esm({
   "node_modules/nodemailer/dist/esm/dkim/sign.js"() {
     init_punycode();
     init_mime_funcs();
+    init_errors3();
     sign.relaxedHeaders = relaxedHeaders;
+    sign.unsupportedHashAlgoError = unsupportedHashAlgoError;
     sign_default = sign;
   }
 });
@@ -39862,13 +40073,21 @@ var init_dkim = __esm({
             return;
           }
           const key = this.keys[keyPos++];
-          const dkimField = sign_default(this.headers, this.hashAlgo, this.bodyHash, {
-            domainName: key.domainName,
-            keySelector: key.keySelector,
-            privateKey: key.privateKey,
-            headerFieldNames: this.options.headerFieldNames,
-            skipFields: this.options.skipFields
-          });
+          let dkimField;
+          try {
+            dkimField = sign_default(this.headers, this.hashAlgo, this.bodyHash, {
+              domainName: key.domainName,
+              keySelector: key.keySelector,
+              privateKey: key.privateKey,
+              headerFieldNames: this.options.headerFieldNames,
+              skipFields: this.options.skipFields
+            });
+          } catch (err) {
+            this.hasErrored = true;
+            this.cleanup();
+            this.output.emit("error", err);
+            return;
+          }
           if (dkimField) {
             this.output.write(Buffer.from(dkimField + "\r\n"));
           }
@@ -39900,8 +40119,8 @@ var init_dkim = __esm({
         this.relaxedBody.pipe(this.cache);
       }
       signStream() {
-        this.parser = new MessageParser();
-        this.relaxedBody = new RelaxedBody({
+        this.parser = new message_parser_default();
+        this.relaxedBody = new relaxed_body_default({
           hashAlgo: this.hashAlgo
         });
         this.parser.on("headers", (value) => {
@@ -39960,7 +40179,12 @@ var init_dkim = __esm({
         }
         const signer = new DKIMSigner(options, this.keys, inputStream, output);
         setImmediate(() => {
-          signer.signStream();
+          try {
+            signer.signStream();
+          } catch (_E) {
+            output.emit("error", sign_default.unsupportedHashAlgoError(signer.hashAlgo));
+            return;
+          }
           if (writeValue) {
             setImmediate(() => {
               inputStream.end(writeValue);
@@ -39983,11 +40207,12 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, tlsOptions,
     tlsOptions = {};
   }
   tlsOptions = tlsOptions || {};
+  const done = callback;
   destinationPort = Number(destinationPort) || 0;
   if (!destinationPort || /[\r\n]/.test(destinationHost)) {
     const err = new Error("Invalid proxy destination");
     err.code = EPROXY;
-    setImmediate(() => callback(err));
+    setImmediate(() => done(err));
     return;
   }
   const proxy = parse2(proxyUrl);
@@ -40013,7 +40238,7 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, tlsOptions,
       socket.destroy();
     } catch (_E) {
     }
-    callback(err);
+    done(err);
   };
   const timeoutErr = () => {
     const err = new Error("Proxy socket timed out");
@@ -40037,18 +40262,25 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, tlsOptions,
       Object.keys(reqHeaders).map((key) => key + ": " + reqHeaders[key]).join("\r\n") + // End request
       "\r\n\r\n"
     );
-    let headers = "";
+    const chunks = [];
+    let received = 0;
+    let tail = "";
     const onSocketData = (chunk) => {
       let match3;
-      let remainder;
       if (finished) {
         return;
       }
-      headers += chunk.toString("binary");
-      if (match3 = headers.match(/\r\n\r\n/)) {
+      const window2 = tail + chunk.toString("binary");
+      const windowEnd = window2.indexOf("\r\n\r\n");
+      chunks.push(chunk);
+      received += chunk.length;
+      tail = window2.slice(-3);
+      if (windowEnd >= 0) {
         socket.removeListener("data", onSocketData);
-        remainder = headers.substr(match3.index + match3[0].length);
-        headers = headers.substr(0, match3.index);
+        const headerEnd = received - window2.length + windowEnd;
+        const response = Buffer.concat(chunks, received).toString("binary");
+        const headers = response.substr(0, headerEnd);
+        const remainder = response.substr(headerEnd + 4);
         if (remainder) {
           socket.unshift(Buffer.from(remainder, "binary"));
         }
@@ -40061,14 +40293,14 @@ function httpProxyClient(proxyUrl, destinationPort, destinationHost, tlsOptions,
           }
           const err = new Error("Invalid response from proxy" + (match3 && ": " + match3[1] || ""));
           err.code = EPROXY;
-          return callback(err);
+          return done(err);
         }
         socket.removeListener("error", tempSocketErr);
         socket.removeListener("timeout", timeoutErr);
         socket.setTimeout(0);
-        return callback(null, socket);
+        return done(null, socket);
       }
-      if (headers.length > MAX_RESPONSE_HEADER_BYTES) {
+      if (received > MAX_RESPONSE_HEADER_BYTES) {
         socket.removeListener("data", onSocketData);
         const err = new Error("Proxy response headers too large");
         err.code = EPROXY;
@@ -40150,7 +40382,7 @@ var init_mail_message = __esm({
         if (this.data.attachments && this.data.attachments.length) {
           this.data.attachments.forEach((attachment, i2) => {
             if (!attachment.filename) {
-              attachment.filename = (attachment.path || attachment.href || "").split("/").pop().split("?").shift() || "attachment-" + (i2 + 1);
+              attachment.filename = (attachment.path || attachment.href || "").split(/[/\\]/).pop().split("?").shift() || "attachment-" + (i2 + 1);
               if (attachment.filename.indexOf(".") < 0) {
                 attachment.filename += "." + detectExtension2(attachment.contentType);
               }
@@ -40706,9 +40938,13 @@ var init_mailer = __esm({
 
 // node_modules/nodemailer/dist/esm/smtp-connection/data-stream.js
 import { Transform as Transform8 } from "node:stream";
-var DataStream;
+var INSERT_LF, INSERT_LF_DOT, INSERT_CR, INSERT_DOT, DataStream;
 var init_data_stream = __esm({
   "node_modules/nodemailer/dist/esm/smtp-connection/data-stream.js"() {
+    INSERT_LF = Buffer.from("\n");
+    INSERT_LF_DOT = Buffer.from("\n.");
+    INSERT_CR = Buffer.from("\r");
+    INSERT_DOT = Buffer.from(".");
     DataStream = class extends Transform8 {
       constructor(options) {
         super(options);
@@ -40734,29 +40970,28 @@ var init_data_stream = __esm({
         }
         this.inByteCount += chunk.length;
         for (i2 = 0, len = chunk.length; i2 < len; i2++) {
-          if (chunk[i2] === 46) {
-            if (i2 && chunk[i2 - 1] === 10 || !i2 && (!this.lastByte || this.lastByte === 10)) {
-              buf = chunk.slice(lastPos, i2 + 1);
+          const byte = chunk[i2];
+          const prev = i2 ? chunk[i2 - 1] : this.lastByte;
+          let insert = false;
+          if (prev === 13 && byte !== 10) {
+            insert = byte === 46 ? INSERT_LF_DOT : INSERT_LF;
+          } else if (byte === 10 && prev !== 13) {
+            insert = INSERT_CR;
+          } else if (byte === 46 && (prev === 10 || prev === false)) {
+            insert = INSERT_DOT;
+          }
+          if (insert) {
+            if (i2 > lastPos) {
+              buf = chunk.slice(lastPos, i2);
               chunks.push(buf);
-              chunks.push(Buffer.from("."));
-              chunklen += buf.length + 1;
-              lastPos = i2 + 1;
+              chunklen += buf.length;
             }
-          } else if (chunk[i2] === 10) {
-            if (i2 && chunk[i2 - 1] !== 13 || !i2 && this.lastByte !== 13) {
-              if (i2 > lastPos) {
-                buf = chunk.slice(lastPos, i2);
-                chunks.push(buf);
-                chunklen += buf.length + 2;
-              } else {
-                chunklen += 2;
-              }
-              chunks.push(Buffer.from("\r\n"));
-              lastPos = i2 + 1;
-            }
+            chunks.push(insert);
+            chunklen += insert.length;
+            lastPos = i2;
           }
         }
-        if (chunklen) {
+        if (chunks.length) {
           if (lastPos < chunk.length) {
             buf = chunk.slice(lastPos);
             chunks.push(buf);
@@ -40807,9 +41042,12 @@ function decodeServerResponse(str) {
   return utf8.includes("\uFFFD") ? str : utf8;
 }
 function isPartialResponse(str) {
-  return /^\d+-/.test(str.slice(str.lastIndexOf("\n") + 1));
+  return isPartialLine(str.slice(str.lastIndexOf("\n") + 1));
 }
-var CONNECTION_TIMEOUT, SOCKET_TIMEOUT, GREETING_TIMEOUT, DNS_TIMEOUT, TEARDOWN_NOOP, SMTPConnection, smtp_connection_default;
+function isPartialLine(line2) {
+  return /^\d+-/.test(line2);
+}
+var CONNECTION_TIMEOUT, SOCKET_TIMEOUT, GREETING_TIMEOUT, DNS_TIMEOUT, TEARDOWN_NOOP, MAX_RESPONSE_SIZE, SMTPConnection, smtp_connection_default;
 var init_smtp_connection = __esm({
   "node_modules/nodemailer/dist/esm/smtp-connection/index.js"() {
     init_package_info();
@@ -40821,12 +41059,16 @@ var init_smtp_connection = __esm({
     DNS_TIMEOUT = 30 * 1e3;
     TEARDOWN_NOOP = () => {
     };
+    MAX_RESPONSE_SIZE = 1024 * 1024;
     SMTPConnection = class extends EventEmitter2 {
       constructor(options) {
         super(options);
         this.id = crypto8.randomBytes(8).toString("base64").replace(/\W/g, "");
         this.stage = "init";
         this.options = options || {};
+        if (this.options.requireTLS && (this.options.ignoreTLS || this.options.opportunisticTLS)) {
+          this.options = Object.assign({}, this.options, { ignoreTLS: false, opportunisticTLS: false });
+        }
         this.secureConnection = !!this.options.secure;
         this.alreadySecured = !!this.options.secured;
         this.port = Number(this.options.port) || (this.secureConnection ? 465 : 587);
@@ -40854,6 +41096,7 @@ var init_smtp_connection = __esm({
         this.secure = !!this.secureConnection;
         this._remainder = "";
         this._responseQueue = [];
+        this._responsePartial = false;
         this.lastServerResponse = false;
         this._socket = false;
         this._supportedAuth = [];
@@ -40868,6 +41111,8 @@ var init_smtp_connection = __esm({
         this._destroyed = false;
         this._closing = false;
         this._currentDataStream = false;
+        this._pendingSend = false;
+        this._connectCallback = false;
         this._onSocketData = (chunk) => this._onData(chunk);
         this._onSocketError = (error2) => this._onError(error2, "ESOCKET", false, "CONN");
         this._onSocketClose = () => this._onClose();
@@ -40882,7 +41127,9 @@ var init_smtp_connection = __esm({
        */
       connect(connectCallback) {
         if (typeof connectCallback === "function") {
+          this._connectCallback = connectCallback;
           this.once("connect", () => {
+            this._connectCallback = false;
             this.logger.debug({
               tnx: "smtp"
             }, "SMTP handshake finished");
@@ -41082,6 +41329,14 @@ var init_smtp_connection = __esm({
           }
           this._currentDataStream = false;
         }
+        if (this._pendingSend) {
+          const { stream, onStreamError } = this._pendingSend;
+          if (stream) {
+            stream.removeListener("error", onStreamError);
+            stream.on("error", TEARDOWN_NOOP);
+          }
+          this._pendingSend = false;
+        }
         if (socket && !socket.destroyed) {
           try {
             socket.setTimeout(0);
@@ -41108,12 +41363,14 @@ var init_smtp_connection = __esm({
         }
         this._auth = authData || {};
         this._authMethod = (this._auth.method || "").toString().trim().toUpperCase() || false;
+        const canUseXOAuth2 = !!this._auth.oauth2 || this.customAuth.has("XOAUTH2");
         if (!this._authMethod && this._auth.oauth2 && !this._auth.credentials) {
           this._authMethod = "XOAUTH2";
         } else if (!this._authMethod || this._authMethod === "XOAUTH2" && !this._auth.oauth2) {
-          this._authMethod = (this._supportedAuth[0] || "PLAIN").toUpperCase().trim();
+          const supported = this._supportedAuth.find((method) => method !== "XOAUTH2" || canUseXOAuth2);
+          this._authMethod = (supported || "PLAIN").toUpperCase().trim();
         }
-        if (this._authMethod !== "XOAUTH2" && (!this._auth.credentials || !this._auth.credentials.user || !this._auth.credentials.pass)) {
+        if ((this._authMethod !== "XOAUTH2" || this.customAuth.has("XOAUTH2")) && (!this._auth.credentials || !this._auth.credentials.user || !this._auth.credentials.pass)) {
           if (this._auth.user && this._auth.pass || this.customAuth.has(this._authMethod)) {
             this._auth.credentials = {
               user: this._auth.user,
@@ -41149,41 +41406,42 @@ var init_smtp_connection = __esm({
             returned = true;
             callback(this._formatError(err, "EAUTH", lastResponse, "AUTH " + this._authMethod));
           };
+          const sendCommand = (cmd, done) => {
+            let promise;
+            if (!done) {
+              promise = new Promise((resolve4, reject2) => {
+                done = callbackPromise(resolve4, reject2);
+              });
+            }
+            this._responseActions.push((str) => {
+              lastResponse = str;
+              let codes = str.match(/^(\d+)(?:\s(\d+\.\d+\.\d+))?\s/);
+              let data = {
+                command: cmd,
+                response: str
+              };
+              if (codes) {
+                data.status = Number(codes[1]) || 0;
+                if (codes[2]) {
+                  data.code = codes[2];
+                }
+                data.text = str.substr(codes[0].length);
+              } else {
+                data.text = str;
+                data.status = 0;
+              }
+              done(null, data);
+            });
+            setImmediate(() => this._sendCommand(cmd));
+            return promise;
+          };
           const handlerResponse = handler2({
             auth: this._auth,
             method: this._authMethod,
             extensions: [].concat(this._supportedExtensions),
             authMethods: [].concat(this._supportedAuth),
             maxAllowedSize: this._maxAllowedSize || false,
-            sendCommand: (cmd, done) => {
-              let promise;
-              if (!done) {
-                promise = new Promise((resolve4, reject2) => {
-                  done = callbackPromise(resolve4, reject2);
-                });
-              }
-              this._responseActions.push((str) => {
-                lastResponse = str;
-                let codes = str.match(/^(\d+)(?:\s(\d+\.\d+\.\d+))?\s/);
-                let data = {
-                  command: cmd,
-                  response: str
-                };
-                if (codes) {
-                  data.status = Number(codes[1]) || 0;
-                  if (codes[2]) {
-                    data.code = codes[2];
-                  }
-                  data.text = str.substr(codes[0].length);
-                } else {
-                  data.text = str;
-                  data.status = 0;
-                }
-                done(null, data);
-              });
-              setImmediate(() => this._sendCommand(cmd));
-              return promise;
-            },
+            sendCommand,
             resolve: resolve3,
             reject
           });
@@ -41236,33 +41494,43 @@ var init_smtp_connection = __esm({
        *
        * @param envelope Envelope object, {from: addr, to: [addr]}
        * @param message String, Buffer or a Stream
-       * @param callback Callback to return once sending is completed
+       * @param done Callback to return once sending is completed
        */
       send(envelope, message, done) {
-        if (!message) {
-          return done(this._formatError("Empty message", "EMESSAGE", false, "API"));
-        }
-        const isDestroyedMessage = this._isDestroyedMessage("send message");
-        if (isDestroyedMessage) {
-          return done(this._formatError(isDestroyedMessage, "ECONNECTION", false, "API"));
-        }
-        if (this._maxAllowedSize && envelope.size > this._maxAllowedSize) {
-          setImmediate(() => {
-            done(this._formatError("Message size larger than allowed " + this._maxAllowedSize, "EMESSAGE", false, "MAIL FROM"));
-          });
-          return;
-        }
         let returned = false;
-        const callback = function(...args) {
+        const callback = (err, info) => {
           if (returned) {
             return;
           }
           returned = true;
-          done(...args);
+          if (this._pendingSend && this._pendingSend.callback === callback) {
+            this._pendingSend = false;
+          }
+          done(err, info);
+        };
+        if (!message) {
+          return callback(this._formatError("Empty message", "EMESSAGE", false, "API"));
+        }
+        const isDestroyedMessage = this._isDestroyedMessage("send message");
+        if (isDestroyedMessage) {
+          return callback(this._formatError(isDestroyedMessage, "ECONNECTION", false, "API"));
+        }
+        if (this._maxAllowedSize && envelope.size > this._maxAllowedSize) {
+          setImmediate(() => {
+            callback(this._formatError("Message size larger than allowed " + this._maxAllowedSize, "EMESSAGE", false, "MAIL FROM"));
+          });
+          return;
+        }
+        const pendingSend = {
+          callback,
+          stream: false,
+          onStreamError: (err) => callback(this._formatError(err, "ESTREAM", false, "API"))
         };
         if (typeof message.on === "function") {
-          message.on("error", (err) => callback(this._formatError(err, "ESTREAM", false, "API")));
+          pendingSend.stream = message;
+          pendingSend.stream.on("error", pendingSend.onStreamError);
         }
+        this._pendingSend = pendingSend;
         const startTime = Date.now();
         this._setEnvelope(envelope, (err, info) => {
           if (err) {
@@ -41280,11 +41548,12 @@ var init_smtp_connection = __esm({
             if (err2) {
               return callback(err2);
             }
-            info.envelopeTime = envelopeTime - startTime;
-            info.messageTime = Date.now() - envelopeTime;
-            info.messageSize = stream.outByteCount;
-            info.response = str;
-            return callback(null, info);
+            const result = info;
+            result.envelopeTime = envelopeTime - startTime;
+            result.messageTime = Date.now() - envelopeTime;
+            result.messageSize = stream.outByteCount;
+            result.response = str;
+            return callback(null, result);
           });
           if (typeof message.pipe === "function") {
             message.pipe(stream);
@@ -41366,27 +41635,46 @@ var init_smtp_connection = __esm({
         if (this._destroyed || !chunk || !chunk.length) {
           return;
         }
-        let data = chunk.toString("binary");
-        let lines = (this._remainder + data).split(/\r?\n/);
-        let lastline;
+        const maxResponseSize = this.options.maxResponseSize || MAX_RESPONSE_SIZE;
+        const data = chunk.toString("binary");
+        if (!data.includes("\n")) {
+          this._remainder += data;
+          if (this._remainder.length > maxResponseSize) {
+            return this._onResponseTooLarge();
+          }
+          return;
+        }
+        const lines = (this._remainder + data).split(/\r?\n/);
         this._remainder = lines.pop();
         for (let i2 = 0, len = lines.length; i2 < len; i2++) {
-          if (this._responseQueue.length) {
-            lastline = this._responseQueue[this._responseQueue.length - 1];
-            if (isPartialResponse(lastline)) {
-              this._responseQueue[this._responseQueue.length - 1] += "\n" + lines[i2];
-              continue;
-            }
+          if (this._responsePartial) {
+            this._responseQueue[this._responseQueue.length - 1] += "\n" + lines[i2];
+          } else {
+            this._responseQueue.push(lines[i2]);
           }
-          this._responseQueue.push(lines[i2]);
+          this._responsePartial = isPartialLine(lines[i2]);
+          if (this._responsePartial && this._responseQueue[this._responseQueue.length - 1].length > maxResponseSize) {
+            return this._onResponseTooLarge();
+          }
         }
-        if (this._responseQueue.length) {
-          lastline = this._responseQueue[this._responseQueue.length - 1];
-          if (isPartialResponse(lastline)) {
-            return;
-          }
+        if (this._remainder.length > maxResponseSize) {
+          return this._onResponseTooLarge();
+        }
+        if (this._responsePartial) {
+          return;
         }
         this._processResponse();
+      }
+      /**
+       * Drops a connection whose peer keeps extending a reply it never completes, releasing
+       * whatever was buffered for that reply
+       * @internal
+       */
+      _onResponseTooLarge() {
+        this._remainder = "";
+        this._responseQueue = [];
+        this._responsePartial = false;
+        this._onError(new Error("Server response exceeds maximum allowed size"), "EPROTOCOL", false, "CONN");
       }
       /**
        * 'error' listener for the socket
@@ -41394,6 +41682,8 @@ var init_smtp_connection = __esm({
        * @event
        * @param err Error object
        * @param type Error name
+       * @param data Server response that triggered the error, false if there is none
+       * @param command SMTP command that was in flight
        * @internal
        */
       _onError(err, type, data, command) {
@@ -41409,8 +41699,12 @@ var init_smtp_connection = __esm({
         } else {
           this.logger.error(data, err.message);
         }
+        const pendingSend = this._pendingSend;
         this.emit("error", err);
         this.close();
+        if (pendingSend) {
+          pendingSend.callback(err);
+        }
       }
       /** @internal */
       _formatError(message, type, response, command) {
@@ -41455,12 +41749,21 @@ var init_smtp_connection = __esm({
         this.logger.info({
           tnx: "network"
         }, "Connection closed");
+        const failureResponse = typeof serverResponse === "string" && /^[45]\d{2}[ -]/.test(serverResponse) ? serverResponse : false;
         if (this.upgrading && !this._destroyed) {
-          return this._onError(new Error("Connection closed unexpectedly"), "ETLS", serverResponse, "CONN");
-        } else if (![this._actionGreeting, this.close].includes(this._responseActions[0]) && !this._destroyed) {
-          return this._onError(new Error("Connection closed unexpectedly"), "ECONNECTION", serverResponse, "CONN");
-        } else if (/^[45]\d{2}\b/.test(serverResponse)) {
-          return this._onError(new Error("Connection closed unexpectedly"), "ECONNECTION", serverResponse, "CONN");
+          return this._onError(new Error("Connection closed unexpectedly"), "ETLS", failureResponse, "CONN");
+        }
+        if (!failureResponse && this._responseActions[0] === this._actionGreeting && this._connectCallback && !this._destroyed) {
+          const connectCallback = this._connectCallback;
+          this._connectCallback = false;
+          const err = this._formatError(new Error("Connection closed unexpectedly"), "ECONNECTION", false, "CONN");
+          this.logger.warn({ tnx: "network" }, err.message);
+          connectCallback(err);
+          this.close();
+          return;
+        }
+        if (failureResponse || this._responseActions[0] !== this.close && !this._destroyed) {
+          return this._onError(new Error("Connection closed unexpectedly"), "ECONNECTION", failureResponse, "CONN");
         }
         this._destroy();
       }
@@ -41510,6 +41813,7 @@ var init_smtp_connection = __esm({
       _upgradeConnection(callback) {
         this._remainder = "";
         this._responseQueue = [];
+        this._responsePartial = false;
         const socketPlain = this._socket;
         socketPlain.removeListener("data", this._onSocketData);
         socketPlain.removeListener("timeout", this._onSocketTimeout);
@@ -41607,6 +41911,7 @@ var init_smtp_connection = __esm({
        *        {from:'...', to:['...']}
        *        or
        *        {from:{address:'...',name:'...'}, to:[address:'...',name:'...']}
+       * @param callback Callback to run once the envelope is processed
        * @internal
        */
       _setEnvelope(envelope, callback) {
@@ -41867,17 +42172,19 @@ var init_smtp_connection = __esm({
         if (/[ -]AUTH\b/i.test(str)) {
           this.allowsAuth = true;
         }
-        if (/[ -]AUTH(?:(\s+|=)[^\n]*\s+|\s+|=)PLAIN/i.test(str)) {
-          this._supportedAuth.push("PLAIN");
+        const authMechanisms = /* @__PURE__ */ new Set();
+        for (const line2 of this._ehloLines) {
+          const authMatch = /^AUTH[\s=](.*)/i.exec(line2);
+          if (authMatch) {
+            for (const mechanism of authMatch[1].split(/[\s=]+/)) {
+              authMechanisms.add(mechanism.toUpperCase());
+            }
+          }
         }
-        if (/[ -]AUTH(?:(\s+|=)[^\n]*\s+|\s+|=)LOGIN/i.test(str)) {
-          this._supportedAuth.push("LOGIN");
-        }
-        if (/[ -]AUTH(?:(\s+|=)[^\n]*\s+|\s+|=)CRAM-MD5/i.test(str)) {
-          this._supportedAuth.push("CRAM-MD5");
-        }
-        if (/[ -]AUTH(?:(\s+|=)[^\n]*\s+|\s+|=)XOAUTH2/i.test(str)) {
-          this._supportedAuth.push("XOAUTH2");
+        for (const mechanism of ["PLAIN", "LOGIN", "CRAM-MD5", "XOAUTH2"]) {
+          if (authMechanisms.has(mechanism)) {
+            this._supportedAuth.push(mechanism);
+          }
         }
         if (match3 = str.match(/[ -]SIZE(?:[ \t]+(\d+))?/im)) {
           this._supportedExtensions.push("SIZE");
@@ -41949,6 +42256,7 @@ var init_smtp_connection = __esm({
        * hosts invalidly use a longer message than VXNlcm5hbWU6
        *
        * @param str Message from the server
+       * @param callback Callback to run once the authentication sequence completes
        * @internal
        */
       _actionAUTH_LOGIN_USER(str, callback) {
@@ -41969,6 +42277,7 @@ var init_smtp_connection = __esm({
        * base64 encoded again.
        *
        * @param str Message from the server
+       * @param callback Callback to run once the authentication sequence completes
        * @internal
        */
       _actionAUTH_CRAM_MD5(str, callback) {
@@ -41994,6 +42303,7 @@ var init_smtp_connection = __esm({
        * the user can be considered logged in. Start waiting for a message to send
        *
        * @param str Message from the server
+       * @param callback Callback to run once the authentication sequence completes
        * @internal
        */
       _actionAUTH_CRAM_MD5_PASS(str, callback) {
@@ -42015,6 +42325,7 @@ var init_smtp_connection = __esm({
        * response needs to be base64 encoded password.
        *
        * @param str Message from the server
+       * @param callback Callback to run once the authentication sequence completes
        * @internal
        */
       _actionAUTH_LOGIN_PASS(str, callback) {
@@ -42035,6 +42346,8 @@ var init_smtp_connection = __esm({
        * the user can be considered logged in. Start waiting for a message to send
        *
        * @param str Message from the server
+       * @param isRetry True if this is a retry after a failed login, or the callback itself
+       * @param [callback] Callback to run once the authentication sequence completes
        * @internal
        */
       _actionAUTHComplete(str, isRetry, callback) {
@@ -42075,6 +42388,7 @@ var init_smtp_connection = __esm({
        * Handle response for a MAIL FROM: command
        *
        * @param str Message from the server
+       * @param callback Callback to run once the envelope is processed
        * @internal
        */
       _actionMAIL(str, callback) {
@@ -42101,6 +42415,7 @@ var init_smtp_connection = __esm({
        * Handle response for a RCPT TO: command
        *
        * @param str Message from the server
+       * @param callback Callback to run once the envelope is processed
        * @internal
        */
       _actionRCPT(str, callback) {
@@ -42123,7 +42438,9 @@ var init_smtp_connection = __esm({
             });
             this._sendCommand("DATA");
           } else {
-            err = this._formatError("Can't send mail - all recipients were rejected", "EENVELOPE", str, "RCPT TO");
+            const deferred = envelope.rejectedErrors.find((rejectedErr) => rejectedErr.responseCode && rejectedErr.responseCode < 500);
+            const reply = deferred?.response ?? str;
+            err = this._formatError("Can't send mail - all recipients were rejected", "EENVELOPE", reply, "RCPT TO");
             err.rejected = envelope.rejected;
             err.rejectedErrors = envelope.rejectedErrors;
             return callback(err);
@@ -42141,6 +42458,7 @@ var init_smtp_connection = __esm({
        * Handle response for a DATA command
        *
        * @param str Message from the server
+       * @param callback Callback to run once the envelope is processed
        * @internal
        */
       _actionDATA(str, callback) {
@@ -42165,6 +42483,7 @@ var init_smtp_connection = __esm({
        * We expect a single response that defines if the sending succeeded or failed
        *
        * @param str Message from the server
+       * @param callback Callback to run with the final send result
        * @internal
        */
       _actionSMTPStream(str, callback) {
@@ -42181,6 +42500,7 @@ var init_smtp_connection = __esm({
        * @param recipient The recipient this response applies to
        * @param final Is this the final recipient?
        * @param str Message from the server
+       * @param callback Callback to run with the final send result
        * @internal
        */
       _actionLMTPStream(recipient, final, str, callback) {
@@ -42275,12 +42595,12 @@ var init_xoauth2 = __esm({
       constructor(options, logger3) {
         super();
         this.options = options || {};
+        this.configError = false;
         if (options && options.serviceClient) {
           if (!options.privateKey || !options.user) {
             const err = new Error('Options "privateKey" and "user" are required for service account!');
             err.code = EOAUTH2;
-            setImmediate(() => this.emit("error", err));
-            return;
+            this.configError = err;
           }
           const serviceRequestTimeout = Math.min(Math.max(Number(this.options.serviceRequestTimeout) || 0, 0), 3600);
           this.options.serviceRequestTimeout = serviceRequestTimeout || 5 * 60;
@@ -42311,6 +42631,10 @@ var init_xoauth2 = __esm({
        * @param callback Callback function with error object and token string
        */
       getToken(renew, callback) {
+        const done = callback;
+        if (this.configError) {
+          return done(this.configError);
+        }
         if (!renew && this.accessToken && (!this.expires || this.expires > Date.now())) {
           this.logger.debug({
             tnx: "OAUTH2",
@@ -42335,10 +42659,10 @@ var init_xoauth2 = __esm({
           }, "Cannot renew access token for %s: No refresh mechanism available", this.options.user);
           const err = new Error("Can't create new access token for user");
           err.code = EOAUTH2;
-          return callback(err);
+          return done(err);
         }
         if (this.renewing) {
-          this.renewalQueue.push({ renew, callback });
+          this.renewalQueue.push({ renew, callback: done });
           return;
         }
         this.renewing = true;
@@ -42360,7 +42684,7 @@ var init_xoauth2 = __esm({
               action: "renew"
             }, "Generated new Access Token for %s", this.options.user);
           }
-          callback(err, accessToken);
+          done(err, accessToken);
         };
         if (this.provisionCallback) {
           this.provisionCallback(this.options.user, !!renew, (err, accessToken, expires) => {
@@ -42398,6 +42722,7 @@ var init_xoauth2 = __esm({
        * @param callback Callback function with error object and token string
        */
       generateToken(callback) {
+        const done = callback;
         let urlOptions;
         let loggedUrlOptions;
         if (this.options.serviceClient) {
@@ -42416,7 +42741,7 @@ var init_xoauth2 = __esm({
           } catch (_err) {
             const err = new Error("Can't generate token. Check your auth options");
             err.code = EOAUTH2;
-            return callback(err);
+            return done(err);
           }
           urlOptions = {
             grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
@@ -42430,7 +42755,7 @@ var init_xoauth2 = __esm({
           if (!this.options.refreshToken) {
             const err = new Error("Can't create new access token for user");
             err.code = EOAUTH2;
-            return callback(err);
+            return done(err);
           }
           urlOptions = {
             client_id: this.options.clientId || "",
@@ -42455,12 +42780,12 @@ var init_xoauth2 = __esm({
         this.postRequest(this.options.accessUrl, urlOptions, this.options, (error2, body) => {
           let data;
           if (error2) {
-            return callback(error2);
+            return done(error2);
           }
           try {
             data = JSON.parse(body.toString());
           } catch (E) {
-            return callback(E);
+            return done(E);
           }
           if (!data || typeof data !== "object") {
             this.logger.debug({
@@ -42470,7 +42795,7 @@ var init_xoauth2 = __esm({
             }, "Response: %s", (body || "").toString());
             const err2 = new Error("Invalid authentication response");
             err2.code = EOAUTH2;
-            return callback(err2);
+            return done(err2);
           }
           const logData = Object.assign({}, data);
           if (logData.access_token) {
@@ -42491,7 +42816,7 @@ var init_xoauth2 = __esm({
             }
             const err2 = new Error(errorMessage);
             err2.code = EOAUTH2;
-            return callback(err2);
+            return done(err2);
           }
           if (data.access_token) {
             this.updateToken(data.access_token, data.expires_in);
@@ -42499,7 +42824,7 @@ var init_xoauth2 = __esm({
           }
           const err = new Error("No access token");
           err.code = EOAUTH2;
-          return callback(err);
+          return done(err);
         });
       }
       /**
@@ -42533,7 +42858,10 @@ var init_xoauth2 = __esm({
           method: "post",
           headers: params.customHeaders,
           body: payload,
-          allowErrorResponse: true
+          allowErrorResponse: true,
+          // unset falls back to the fetch default, a stalled token endpoint would otherwise keep
+          // `renewing` set and queue every later request
+          timeout: params.requestTimeout
         };
         if (/^https:/i.test(url)) {
           fetchOptions.tls = Object.assign({ rejectUnauthorized: true }, params.tls || {});
@@ -42616,7 +42944,7 @@ var init_pool_resource = __esm({
                 method: "XOAUTH2"
               };
               oauth2.on("token", (token) => this.pool.mailer.emit("token", token));
-              oauth2.on("error", (err) => this.emit("error", err));
+              oauth2.on("error", (err) => this._fail(err));
               break;
             }
             default:
@@ -42639,6 +42967,19 @@ var init_pool_resource = __esm({
         this._connected = false;
         this.messages = 0;
         this.available = true;
+        this._failed = false;
+      }
+      /**
+       * Emits 'error' for the first failure only. A dead resource can report the same failure more
+       * than once (the connection error, then the send callback), the pool handles it once
+       * @internal
+       */
+      _fail(err) {
+        if (this._failed) {
+          return;
+        }
+        this._failed = true;
+        this.emit("error", err);
       }
       /**
        * Initiates a connection to the SMTP server
@@ -42648,7 +42989,7 @@ var init_pool_resource = __esm({
       connect(callback) {
         this.pool.getSocket(this.options, (err, socketOptions) => {
           if (err) {
-            this.emit("error", err);
+            this._fail(err);
             return callback(err);
           }
           let returned = false;
@@ -42665,8 +43006,8 @@ var init_pool_resource = __esm({
             options = Object.assign(assign(false, options), socketOptions);
           }
           this.connection = new smtp_connection_default(options);
-          this.connection.once("error", (err2) => {
-            this.emit("error", err2);
+          this.connection.on("error", (err2) => {
+            this._fail(err2);
             if (returned) {
               return;
             }
@@ -42675,39 +43016,26 @@ var init_pool_resource = __esm({
           });
           this.connection.once("end", () => {
             this.close();
+            returned = true;
+          });
+          this.connection.connect((err2) => {
             if (returned) {
               return;
             }
-            returned = true;
-            const timer = setTimeout(() => {
-              if (returned) {
-                return;
-              }
-              const err2 = new Error("Unexpected socket close");
-              if (this.connection && this.connection._socket && this.connection._socket.upgrading) {
-                err2.code = ETLS;
-              }
-              callback(err2);
-            }, 1e3);
-            try {
-              timer.unref();
-            } catch (_E) {
-            }
-          });
-          this.connection.connect(() => {
-            if (returned) {
+            if (err2) {
+              returned = true;
               return;
             }
             if (this.auth && (this.connection.allowsAuth || options.forceAuth)) {
-              this.connection.login(this.auth, (err2) => {
+              this.connection.login(this.auth, (err3) => {
                 if (returned) {
                   return;
                 }
                 returned = true;
-                if (err2) {
+                if (err3) {
                   this.connection.close();
-                  this.emit("error", err2);
-                  return callback(err2);
+                  this._fail(err3);
+                  return callback(err3);
                 }
                 this._connected = true;
                 callback(null, true);
@@ -42756,7 +43084,7 @@ var init_pool_resource = __esm({
           this.messages++;
           if (err) {
             this.connection.close();
-            this.emit("error", err);
+            this._fail(err);
             return callback(err);
           }
           info.envelope = {
@@ -42769,7 +43097,7 @@ var init_pool_resource = __esm({
               const err2 = new Error("Resource exhausted");
               err2.code = EMAXLIMIT;
               this.connection.close();
-              this.emit("error", err2);
+              this._fail(err2);
             } else {
               this.pool._checkRateLimit(() => {
                 this.available = true;
@@ -43112,6 +43440,12 @@ var init_services = __esm({
         "description": "Mailosaur (email testing service)",
         "host": "mailosaur.io",
         "port": 25
+      },
+      "MailSenpai": {
+        "description": "MailSenpai (SMTP Senpai, EU)",
+        "host": "relay.mailsenpai.com",
+        "port": 2525,
+        "secure": false
       },
       "Mailtrap": {
         "description": "Mailtrap",
@@ -43506,7 +43840,7 @@ var init_well_known = __esm({
 
 // node_modules/nodemailer/dist/esm/smtp-pool/index.js
 import { EventEmitter as EventEmitter4 } from "node:events";
-var SMTPPool, smtp_pool_default;
+var REQUEUE_BASE_DELAY, REQUEUE_MAX_DELAY, SMTPPool, smtp_pool_default;
 var init_smtp_pool = __esm({
   "node_modules/nodemailer/dist/esm/smtp-pool/index.js"() {
     init_pool_resource();
@@ -43515,6 +43849,8 @@ var init_smtp_pool = __esm({
     init_shared();
     init_errors3();
     init_package_info();
+    REQUEUE_BASE_DELAY = 50;
+    REQUEUE_MAX_DELAY = 2e3;
     SMTPPool = class extends EventEmitter4 {
       constructor(options) {
         super();
@@ -43545,6 +43881,7 @@ var init_smtp_pool = __esm({
         );
         this.options.maxConnections = this.options.maxConnections || 5;
         this.options.maxMessages = this.options.maxMessages || 100;
+        this.options.maxRequeues = typeof this.options.maxRequeues === "number" ? this.options.maxRequeues : 5;
         this.logger = getLogger2(this.options, {
           component: this.options.component || "smtp-pool"
         });
@@ -43587,6 +43924,9 @@ var init_smtp_pool = __esm({
        */
       send(mail, callback) {
         if (this._closed) {
+          const err = new Error("Connection pool was closed");
+          err.code = ECONNECTION;
+          setImmediate(() => callback(err));
           return false;
         }
         this._queue.push({
@@ -43608,7 +43948,7 @@ var init_smtp_pool = __esm({
         let connection;
         const len = this._connections.length;
         this._closed = true;
-        clearTimeout(this._rateLimit.timeout);
+        this._clearRateLimit();
         if (!len && !this._queue.length) {
           return;
         }
@@ -43773,14 +44113,19 @@ var init_smtp_pool = __esm({
           this._removeConnection(connection);
           if (connection.queueEntry) {
             setTimeout(() => {
+              let delay = 0;
               if (connection.queueEntry) {
                 if (this._shouldRequeuOnConnectionClose(connection.queueEntry)) {
-                  this._requeueEntryOnConnectionClose(connection);
+                  delay = this._requeueEntryOnConnectionClose(connection);
                 } else {
                   this._failDeliveryOnConnectionClose(connection);
                 }
               }
-              this._continueProcessing();
+              if (delay) {
+                setTimeout(() => this._continueProcessing(), delay);
+              } else {
+                this._continueProcessing();
+              }
             }, 50);
           } else {
             if (!this._closed && this.idling && !this._connections.length) {
@@ -43794,7 +44139,7 @@ var init_smtp_pool = __esm({
       }
       /** @internal */
       _shouldRequeuOnConnectionClose(queueEntry) {
-        if (this.options.maxRequeues === void 0 || this.options.maxRequeues < 0) {
+        if (this.options.maxRequeues < 0) {
           return true;
         }
         return queueEntry.requeueAttempts < this.options.maxRequeues;
@@ -43803,7 +44148,9 @@ var init_smtp_pool = __esm({
       _failDeliveryOnConnectionClose(connection) {
         if (connection.queueEntry && connection.queueEntry.callback) {
           try {
-            connection.queueEntry.callback(new Error("Reached maximum number of retries after connection was closed"));
+            const err = new Error("Reached maximum number of retries after connection was closed");
+            err.code = ECONNECTION;
+            connection.queueEntry.callback(err);
           } catch (E) {
             this.logger.error({
               err: E,
@@ -43817,6 +44164,7 @@ var init_smtp_pool = __esm({
       }
       /** @internal */
       _requeueEntryOnConnectionClose(connection) {
+        const delay = Math.min(REQUEUE_BASE_DELAY * 2 ** connection.queueEntry.requeueAttempts, REQUEUE_MAX_DELAY);
         connection.queueEntry.requeueAttempts += 1;
         this.logger.debug({
           tnx: "pool",
@@ -43826,6 +44174,7 @@ var init_smtp_pool = __esm({
         }, "Re-queued message <%s> for #%s. Attempt: #%s", connection.queueEntry.messageId, connection.id, connection.queueEntry.requeueAttempts);
         this._queue.unshift(connection.queueEntry);
         connection.queueEntry = false;
+        return delay;
       }
       /**
        * Continue to process message if the pool hasn't closed
@@ -43900,10 +44249,11 @@ var init_smtp_pool = __esm({
             callback = callbackPromise(resolve3, reject);
           });
         }
+        const done = callback;
         const auth2 = new PoolResource(this).auth;
         this.getSocket(this.options, (err, socketOptions) => {
           if (err) {
-            return callback(err);
+            return done(err);
           }
           let options = this.options;
           if (socketOptions && socketOptions.connection) {
@@ -43925,14 +44275,14 @@ var init_smtp_pool = __esm({
             }
             returned = true;
             connection.close();
-            return callback(err2);
+            return done(err2);
           });
           connection.once("end", () => {
             if (returned) {
               return;
             }
             returned = true;
-            return callback(new Error("Connection closed"));
+            return done(new Error("Connection closed"));
           });
           const finalize = () => {
             if (returned) {
@@ -43940,30 +44290,35 @@ var init_smtp_pool = __esm({
             }
             returned = true;
             connection.quit();
-            return callback(null, true);
+            return done(null, true);
           };
-          connection.connect(() => {
+          connection.connect((err2) => {
             if (returned) {
               return;
             }
+            if (err2) {
+              returned = true;
+              connection.close();
+              return done(err2);
+            }
             if (auth2 && (connection.allowsAuth || options.forceAuth)) {
-              connection.login(auth2, (err2) => {
+              connection.login(auth2, (err3) => {
                 if (returned) {
                   return;
                 }
-                if (err2) {
+                if (err3) {
                   returned = true;
                   connection.close();
-                  return callback(err2);
+                  return done(err3);
                 }
                 finalize();
               });
             } else if (!auth2 && connection.allowsAuth && options.forceAuth) {
-              const err2 = new Error("Authentication info was not provided");
-              err2.code = ENOAUTH;
+              const err3 = new Error("Authentication info was not provided");
+              err3.code = ENOAUTH;
               returned = true;
               connection.close();
-              return callback(err2);
+              return done(err3);
             } else {
               finalize();
             }
@@ -44115,27 +44470,6 @@ var init_smtp_transport = __esm({
             connection.close();
             return callback(err2);
           });
-          connection.once("end", () => {
-            if (returned) {
-              return;
-            }
-            const timer = setTimeout(() => {
-              if (returned) {
-                return;
-              }
-              returned = true;
-              cleanupPerCallAuth();
-              const err2 = new Error("Unexpected socket close");
-              if (connection && connection._socket && connection._socket.upgrading) {
-                err2.code = ETLS;
-              }
-              callback(err2);
-            }, 1e3);
-            try {
-              timer.unref();
-            } catch (_E) {
-            }
-          });
           const sendMessage = () => {
             const envelope = mail.message.getEnvelope();
             const messageId = mail.message.messageId();
@@ -44154,6 +44488,9 @@ var init_smtp_transport = __esm({
               messageId
             }, "Sending message %s to <%s>", messageId, recipients.join(", "));
             connection.send(envelope, mail.message.createReadStream(), (err2, info) => {
+              if (returned) {
+                return;
+              }
               returned = true;
               cleanupPerCallAuth();
               connection.close();
@@ -44179,21 +44516,26 @@ var init_smtp_transport = __esm({
               }
             });
           };
-          connection.connect(() => {
+          connection.connect((err2) => {
             if (returned) {
               return;
             }
+            if (err2) {
+              returned = true;
+              connection.close();
+              return callback(err2);
+            }
             perCallAuth = this.getAuth(mail.data.auth);
             if (perCallAuth && (connection.allowsAuth || options.forceAuth)) {
-              connection.login(perCallAuth, (err2) => {
+              connection.login(perCallAuth, (err3) => {
                 cleanupPerCallAuth();
                 if (returned) {
                   return;
                 }
-                if (err2) {
+                if (err3) {
                   returned = true;
                   connection.close();
-                  return callback(err2);
+                  return callback(err3);
                 }
                 sendMessage();
               });
@@ -44210,9 +44552,10 @@ var init_smtp_transport = __esm({
             callback = callbackPromise(resolve3, reject);
           });
         }
+        const done = callback;
         this.getSocket(this.options, (err, socketOptions) => {
           if (err) {
-            return callback(err);
+            return done(err);
           }
           let options = this.options;
           if (socketOptions && socketOptions.connection) {
@@ -44242,7 +44585,7 @@ var init_smtp_transport = __esm({
             returned = true;
             cleanupPerCallAuth();
             connection.close();
-            return callback(err2);
+            return done(err2);
           });
           connection.once("end", () => {
             if (returned) {
@@ -44250,7 +44593,7 @@ var init_smtp_transport = __esm({
             }
             returned = true;
             cleanupPerCallAuth();
-            return callback(new Error("Connection closed"));
+            return done(new Error("Connection closed"));
           });
           const finalize = () => {
             if (returned) {
@@ -44259,33 +44602,38 @@ var init_smtp_transport = __esm({
             returned = true;
             cleanupPerCallAuth();
             connection.quit();
-            return callback(null, true);
+            return done(null, true);
           };
-          connection.connect(() => {
+          connection.connect((err2) => {
             if (returned) {
               return;
             }
+            if (err2) {
+              returned = true;
+              connection.close();
+              return done(err2);
+            }
             perCallAuth = this.getAuth({});
             if (perCallAuth && (connection.allowsAuth || options.forceAuth)) {
-              connection.login(perCallAuth, (err2) => {
+              connection.login(perCallAuth, (err3) => {
                 cleanupPerCallAuth();
                 if (returned) {
                   return;
                 }
-                if (err2) {
+                if (err3) {
                   returned = true;
                   connection.close();
-                  return callback(err2);
+                  return done(err3);
                 }
                 finalize();
               });
             } else if (!perCallAuth && connection.allowsAuth && options.forceAuth) {
-              const err2 = new Error("Authentication info was not provided");
-              err2.code = ENOAUTH;
+              const err3 = new Error("Authentication info was not provided");
+              err3.code = ENOAUTH;
               returned = true;
               cleanupPerCallAuth();
               connection.close();
-              return callback(err2);
+              return done(err3);
             } else {
               finalize();
             }
@@ -80112,8 +80460,10 @@ async function batchInsertVaultItems(dbClient, items, key, createdBy, startSortO
       deletedAt: item.deletedAt ?? item.deleted_at ?? null,
       createdAt: Date.now(),
       // camelCase 匹配 Drizzle schema
-      createdBy
+      createdBy,
       // camelCase 匹配 Drizzle schema
+      updatedAt: Date.now(),
+      updatedBy: createdBy
     };
   }));
   if (typeof dbClient.batch === "function") {
@@ -80404,6 +80754,7 @@ var VaultService = class {
     }
     const encryptedSecret = await encryptField(secret, this.encryptionKey);
     const maxSort = await this.repository.getMaxSortOrder();
+    const now = Date.now();
     const created = await this.repository.create({
       id: crypto.randomUUID(),
       service,
@@ -80416,8 +80767,10 @@ var VaultService = class {
       period,
       counter,
       sortOrder: maxSort + 1,
-      createdAt: Date.now(),
-      createdBy: userId
+      createdAt: now,
+      createdBy: userId,
+      updatedAt: now,
+      updatedBy: userId
     });
     const { createdBy: _c, updatedBy: _u, ...restCreated } = created;
     return {
@@ -80831,7 +81184,8 @@ var TrashService = class {
     if (existing.deletedAt !== null) {
       return { success: true };
     }
-    await this.repository.update(id, { deletedAt: Date.now() });
+    const now = Date.now();
+    await this.repository.update(id, { deletedAt: now, updatedAt: now });
     return { success: true };
   }
   /**
@@ -80865,7 +81219,8 @@ var TrashService = class {
     }
     await this.repository.update(id, {
       deletedAt: null,
-      sortOrder: nextSortOrder
+      sortOrder: nextSortOrder,
+      updatedAt: Date.now()
     });
     return { success: true };
   }
@@ -80901,7 +81256,7 @@ var TrashService = class {
     if (clientTimestamp < 0 || clientTimestamp > now + 3e5) {
       deletedAt = now;
     }
-    await this.repository.update(id, { deletedAt });
+    await this.repository.update(id, { deletedAt, updatedAt: now });
     return { success: true };
   }
 };
@@ -80933,8 +81288,9 @@ var VaultRepository = class {
       return [];
     }
     const baseQuery = this.db.select().from(vault4);
-    const queryWithWhere = sinceTimestamp && sinceTimestamp > 0 ? baseQuery.where(sql`${vault4.updatedAt} > ${sinceTimestamp}`) : baseQuery;
-    return await queryWithWhere.orderBy(desc(vault4.updatedAt)).limit(limitVal).offset(offsetVal);
+    const effectiveUpdatedAt = sql`coalesce(${vault4.updatedAt}, ${vault4.createdAt})`;
+    const queryWithWhere = sinceTimestamp && sinceTimestamp > 0 ? baseQuery.where(sql`${effectiveUpdatedAt} > ${sinceTimestamp}`) : baseQuery;
+    return await queryWithWhere.orderBy(desc(effectiveUpdatedAt)).limit(limitVal).offset(offsetVal);
   }
   /**
    * 获取当前最大排序值
@@ -81219,7 +81575,7 @@ var VaultRepository = class {
     const BATCH = 50;
     for (let i2 = 0; i2 < ids.length; i2 += BATCH) {
       const chunk = ids.slice(i2, i2 + BATCH);
-      await this.db.update(vault4).set({ deletedAt: timestamp3, sortOrder: 0 }).where(inArray(vault4.id, chunk));
+      await this.db.update(vault4).set({ deletedAt: timestamp3, sortOrder: 0, updatedAt: timestamp3 }).where(inArray(vault4.id, chunk));
       count += chunk.length;
     }
     return count;
@@ -82230,6 +82586,57 @@ function generateBasicAuthHeader(username, password) {
 function generateTokenAuthHeader(token) {
   return `${token.token_type} ${token.access_token}`;
 }
+
+// node_modules/webdav/dist/node/types.js
+var AuthType;
+(function(AuthType2) {
+  AuthType2["Auto"] = "auto";
+  AuthType2["Digest"] = "digest";
+  AuthType2["None"] = "none";
+  AuthType2["Password"] = "password";
+  AuthType2["Token"] = "token";
+})(AuthType || (AuthType = {}));
+var ErrorCode;
+(function(ErrorCode2) {
+  ErrorCode2["DataTypeNoLength"] = "data-type-no-length";
+  ErrorCode2["InvalidAuthType"] = "invalid-auth-type";
+  ErrorCode2["InvalidOutputFormat"] = "invalid-output-format";
+  ErrorCode2["LinkUnsupportedAuthType"] = "link-unsupported-auth";
+  ErrorCode2["InvalidUpdateRange"] = "invalid-update-range";
+  ErrorCode2["NotSupported"] = "not-supported";
+})(ErrorCode || (ErrorCode = {}));
+
+// node_modules/webdav/dist/node/auth/index.js
+function setupAuth(context, username, password, oauthToken, ha1) {
+  switch (context.authType) {
+    case AuthType.Auto:
+      if (username && password) {
+        context.headers.Authorization = generateBasicAuthHeader(username, password);
+      }
+      break;
+    case AuthType.Digest:
+      context.digest = createDigestContext(username, password, ha1);
+      break;
+    case AuthType.None:
+      break;
+    case AuthType.Password:
+      context.headers.Authorization = generateBasicAuthHeader(username, password);
+      break;
+    case AuthType.Token:
+      context.headers.Authorization = generateTokenAuthHeader(oauthToken);
+      break;
+    default:
+      throw new Layerr({
+        info: {
+          code: ErrorCode.InvalidAuthType
+        }
+      }, `Invalid auth type: ${context.authType}`);
+  }
+}
+
+// node_modules/webdav/dist/node/request.js
+import { Agent as HTTPAgent } from "http";
+import { Agent as HTTPSAgent } from "https";
 
 // node_modules/node-fetch/src/index.js
 import http3 from "node:http";
@@ -83512,57 +83919,6 @@ function fixResponseChunkedTransferBadEnding(request2, errorCallback) {
   });
 }
 
-// node_modules/webdav/dist/node/types.js
-var AuthType;
-(function(AuthType2) {
-  AuthType2["Auto"] = "auto";
-  AuthType2["Digest"] = "digest";
-  AuthType2["None"] = "none";
-  AuthType2["Password"] = "password";
-  AuthType2["Token"] = "token";
-})(AuthType || (AuthType = {}));
-var ErrorCode;
-(function(ErrorCode2) {
-  ErrorCode2["DataTypeNoLength"] = "data-type-no-length";
-  ErrorCode2["InvalidAuthType"] = "invalid-auth-type";
-  ErrorCode2["InvalidOutputFormat"] = "invalid-output-format";
-  ErrorCode2["LinkUnsupportedAuthType"] = "link-unsupported-auth";
-  ErrorCode2["InvalidUpdateRange"] = "invalid-update-range";
-  ErrorCode2["NotSupported"] = "not-supported";
-})(ErrorCode || (ErrorCode = {}));
-
-// node_modules/webdav/dist/node/auth/index.js
-function setupAuth(context, username, password, oauthToken, ha1) {
-  switch (context.authType) {
-    case AuthType.Auto:
-      if (username && password) {
-        context.headers.Authorization = generateBasicAuthHeader(username, password);
-      }
-      break;
-    case AuthType.Digest:
-      context.digest = createDigestContext(username, password, ha1);
-      break;
-    case AuthType.None:
-      break;
-    case AuthType.Password:
-      context.headers.Authorization = generateBasicAuthHeader(username, password);
-      break;
-    case AuthType.Token:
-      context.headers.Authorization = generateTokenAuthHeader(oauthToken);
-      break;
-    default:
-      throw new Layerr({
-        info: {
-          code: ErrorCode.InvalidAuthType
-        }
-      }, `Invalid auth type: ${context.authType}`);
-  }
-}
-
-// node_modules/webdav/dist/node/request.js
-import { Agent as HTTPAgent } from "http";
-import { Agent as HTTPSAgent } from "https";
-
 // node_modules/hot-patcher/dist/functions.js
 function sequence(...methods) {
   if (methods.length === 0) {
@@ -83841,9 +84197,9 @@ function mergeObjects(obj1, obj2) {
 // node_modules/webdav/dist/node/tools/headers.js
 function convertResponseHeaders(headers) {
   const output = {};
-  for (const key of headers.keys()) {
-    output[key] = headers.get(key);
-  }
+  headers.forEach((value, key) => {
+    output[key] = value;
+  });
   return output;
 }
 function mergeHeaders(...headerPayloads) {
@@ -84088,6 +84444,8 @@ var commaPattern = /\\,/g;
 var periodPattern = /\\\./g;
 var EXPANSION_MAX = 1e5;
 var EXPANSION_MAX_LENGTH = 4e6;
+var EXPANSION_MAX_DEPTH = 1e3;
+var EXPANSION_MAX_REWRITES = 1e3;
 function numeric3(str) {
   return !isNaN(str) ? parseInt(str, 10) : str.charCodeAt(0);
 }
@@ -84097,36 +84455,44 @@ function escapeBraces(str) {
 function unescapeBraces(str) {
   return str.replace(escSlashPattern, "\\").replace(escOpenPattern, "{").replace(escClosePattern, "}").replace(escCommaPattern, ",").replace(escPeriodPattern, ".");
 }
+function pushAll(target, items) {
+  for (let i2 = 0; i2 < items.length; i2++) {
+    target.push(items[i2]);
+  }
+}
 function parseCommaParts(str) {
-  if (!str) {
-    return [""];
-  }
   const parts = [];
-  const m2 = balanced("{", "}", str);
-  if (!m2) {
-    return str.split(",");
+  let carry = "";
+  for (; ; ) {
+    const m2 = balanced("{", "}", str);
+    if (!m2) {
+      const tail = str.split(",");
+      tail[0] = carry + tail[0];
+      pushAll(parts, tail);
+      return parts;
+    }
+    const { pre, body, post } = m2;
+    const p = pre.split(",");
+    p[0] = carry + p[0];
+    p[p.length - 1] += "{" + body + "}";
+    if (!post.length) {
+      pushAll(parts, p);
+      return parts;
+    }
+    carry = p.pop();
+    pushAll(parts, p);
+    str = post;
   }
-  const { pre, body, post } = m2;
-  const p = pre.split(",");
-  p[p.length - 1] += "{" + body + "}";
-  const postParts = parseCommaParts(post);
-  if (post.length) {
-    ;
-    p[p.length - 1] += postParts.shift();
-    p.push.apply(p, postParts);
-  }
-  parts.push.apply(parts, p);
-  return parts;
 }
 function expand(str, options = {}) {
   if (!str) {
     return [];
   }
-  const { max = EXPANSION_MAX, maxLength = EXPANSION_MAX_LENGTH } = options;
+  const { max = EXPANSION_MAX, maxLength = EXPANSION_MAX_LENGTH, maxDepth = EXPANSION_MAX_DEPTH, maxRewrites = EXPANSION_MAX_REWRITES } = options;
   if (str.slice(0, 2) === "{}") {
     str = "\\{\\}" + str.slice(2);
   }
-  return expand_(escapeBraces(str), max, maxLength, true).map(unescapeBraces);
+  return expand_(escapeBraces(str), max, maxLength, maxDepth, 0, maxRewrites, true).map(unescapeBraces);
 }
 function embrace(str) {
   return "{" + str + "}";
@@ -84204,8 +84570,12 @@ function expandSequence(body, isAlphaSequence, max, maxLength) {
   }
   return N;
 }
-function expand_(str, max, maxLength, isTop) {
+function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
+  if (depth > maxDepth) {
+    return [str];
+  }
   let acc = [""];
+  let rewrites = 0;
   let dropEmpties = false;
   let firstGroup = true;
   for (; ; ) {
@@ -84227,7 +84597,8 @@ function expand_(str, max, maxLength, isTop) {
     const isSequence = isNumericSequence || isAlphaSequence;
     const isOptions = m2.body.indexOf(",") >= 0;
     if (!isSequence && !isOptions) {
-      if (m2.post.match(/,(?!,).*\}/)) {
+      if (rewrites < maxRewrites && m2.post.match(/,(?!,).*\}/)) {
+        rewrites++;
         str = m2.pre + "{" + m2.body + escClose + m2.post;
         isTop = true;
         continue;
@@ -84244,7 +84615,7 @@ function expand_(str, max, maxLength, isTop) {
     } else {
       let n = parseCommaParts(m2.body);
       if (n.length === 1 && n[0] !== void 0) {
-        n = expand_(n[0], max, maxLength, false).map(embrace);
+        n = expand_(n[0], max, maxLength, maxDepth, depth + 1, maxRewrites, false).map(embrace);
         if (n.length === 1) {
           acc = combine(acc, pre + n[0], [""], max, maxLength, dropEmpties && !m2.post.length);
           if (!m2.post.length)
@@ -84262,7 +84633,7 @@ function expand_(str, max, maxLength, isTop) {
       values = [];
       let valuesLength = 0;
       outer: for (let j = 0; j < n.length; j++) {
-        const expanded = expand_(n[j], max, maxLength, false);
+        const expanded = expand_(n[j], max, maxLength, maxDepth, depth + 1, maxRewrites, false);
         for (let k = 0; k < expanded.length; k++) {
           const v = expanded[k];
           if (dropsEmpties && !v)
@@ -86200,9 +86571,55 @@ function readAttributeStr(xmlData, i2) {
     tagClosed
   };
 }
-var validAttrStrRegxp = new RegExp(`(\\s*)([^\\s=]+)(\\s*=)?(\\s*(['"])(([\\s\\S])*?)\\5)?`, "g");
+function scanAttributeTokens(attrStr) {
+  const tokens = [];
+  const len = attrStr.length;
+  let i2 = 0;
+  while (i2 < len) {
+    const tokenStart = i2;
+    while (i2 < len && isWhiteSpace(attrStr[i2])) i2++;
+    if (i2 >= len) break;
+    if (attrStr[i2] === "=") {
+      i2 = tokenStart + 1;
+      continue;
+    }
+    const leadingWs = attrStr.slice(tokenStart, i2);
+    const nameStart = i2;
+    while (i2 < len && !isWhiteSpace(attrStr[i2]) && attrStr[i2] !== "=") i2++;
+    const name2 = attrStr.slice(nameStart, i2);
+    let equalsGroup;
+    let j = i2;
+    while (j < len && isWhiteSpace(attrStr[j])) j++;
+    if (j < len && attrStr[j] === "=") {
+      equalsGroup = attrStr.slice(i2, j + 1);
+      i2 = j + 1;
+    }
+    let quoteChar;
+    let value;
+    let k = i2;
+    while (k < len && isWhiteSpace(attrStr[k])) k++;
+    if (k < len && (attrStr[k] === '"' || attrStr[k] === "'")) {
+      const valueStart = k + 1;
+      const closeIdx = attrStr.indexOf(attrStr[k], valueStart);
+      if (closeIdx !== -1) {
+        quoteChar = attrStr[k];
+        value = attrStr.slice(valueStart, closeIdx);
+        i2 = closeIdx + 1;
+      }
+    }
+    const token = { startIndex: tokenStart };
+    token[1] = leadingWs;
+    token[2] = name2;
+    token[3] = equalsGroup;
+    token[4] = quoteChar !== void 0 ? true : void 0;
+    token[5] = quoteChar;
+    token[6] = value;
+    tokens.push(token);
+  }
+  return tokens;
+}
 function validateAttributeString(attrStr, options) {
-  const matches = getAllMatches(attrStr, validAttrStrRegxp);
+  const matches = scanAttributeTokens(attrStr);
   const attrNames = {};
   for (let i2 = 0; i2 < matches.length; i2++) {
     if (matches[i2][1].length === 0) {
@@ -86935,8 +87352,17 @@ var XmlNode = class {
     } else {
       this.child.push({ [node.tagname]: node.child });
     }
+    this.addStartIndex(startIndex);
+  }
+  addStartIndex(startIndex) {
     if (startIndex !== void 0) {
       this.child[this.child.length - 1][METADATA_SYMBOL] = { startIndex };
+    }
+  }
+  addEndIndex(endIndex) {
+    const lastChild = this.child[this.child.length - 1];
+    if (lastChild !== void 0 && lastChild[METADATA_SYMBOL] !== void 0 && lastChild[METADATA_SYMBOL].endIndex === void 0) {
+      lastChild[METADATA_SYMBOL].endIndex = endIndex;
     }
   }
   /** symbol used for metadata */
@@ -86990,8 +87416,19 @@ var DocTypeReader = class {
       i2 = i2 + 9;
       let angleBracketsCount = 1;
       let hasBody = false, comment = false;
+      let quoteChar = null;
       let exp = "";
       for (; i2 < xmlData.length; i2++) {
+        if (quoteChar !== null) {
+          if (xmlData[i2] === quoteChar) quoteChar = null;
+          exp += xmlData[i2];
+          continue;
+        }
+        if (!hasBody && !comment && (xmlData[i2] === '"' || xmlData[i2] === "'")) {
+          quoteChar = xmlData[i2];
+          exp += xmlData[i2];
+          continue;
+        }
         if (xmlData[i2] === "<" && !comment) {
           if (hasBody && hasSeq(xmlData, "!ENTITY", i2)) {
             i2 += 7;
@@ -87038,7 +87475,7 @@ var DocTypeReader = class {
           exp += xmlData[i2];
         }
       }
-      if (angleBracketsCount !== 0) {
+      if (quoteChar !== null || angleBracketsCount !== 0) {
         throw new Error(`Unclosed DOCTYPE`);
       }
     } else {
@@ -87585,7 +88022,9 @@ function resolveEnotation(str, trimmedStr, options) {
 }
 function trimZeros(numStr) {
   if (numStr && numStr.indexOf(".") !== -1) {
-    numStr = numStr.replace(/0+$/, "");
+    let end = numStr.length;
+    while (end > 0 && numStr.charCodeAt(end - 1) === 48) end--;
+    numStr = numStr.slice(0, end);
     if (numStr === ".") numStr = "0";
     else if (numStr[0] === ".") numStr = "0" + numStr;
     else if (numStr[numStr.length - 1] === ".") numStr = numStr.substring(0, numStr.length - 1);
@@ -89433,7 +89872,10 @@ var parseXml = function(xmlData) {
         }
         this.matcher.pop();
         this.isCurrentNodeStopNode = false;
-        currentNode = this.tagsNodeStack.pop();
+        currentNode = this.tagsNodeStack.pop() || xmlObj;
+        if (options.captureMetaData && currentNode) {
+          currentNode.addEndIndex(closeIndex + 1);
+        }
         textData = "";
         i2 = closeIndex;
       } else if (c1 === 63) {
@@ -89454,6 +89896,9 @@ var parseXml = function(xmlData) {
             childNode[":@"] = attsMap;
           }
           this.addChild(currentNode, childNode, this.readonlyMatcher, i2);
+          if (options.captureMetaData) {
+            currentNode.addEndIndex(tagData.closeIndex + 2);
+          }
         }
         i2 = tagData.closeIndex + 1;
       } else if (c1 === 33 && xmlData.charCodeAt(i2 + 2) === 45 && xmlData.charCodeAt(i2 + 3) === 45) {
@@ -89555,6 +90000,9 @@ var parseXml = function(xmlData) {
           this.matcher.pop();
           this.isCurrentNodeStopNode = false;
           this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+          if (options.captureMetaData) {
+            currentNode.addEndIndex(i2 + 1);
+          }
         } else {
           if (isSelfClosing) {
             ({ tagName, tagExp } = transformTagName(options.transformTagName, tagName, tagExp, options));
@@ -89563,6 +90011,9 @@ var parseXml = function(xmlData) {
               childNode[":@"] = prefixedAttrs;
             }
             this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+            if (options.captureMetaData) {
+              currentNode.addEndIndex(closeIndex + 1);
+            }
             this.matcher.pop();
             this.isCurrentNodeStopNode = false;
           } else if (options.unpairedTagsSet.has(tagName)) {
@@ -89571,6 +90022,9 @@ var parseXml = function(xmlData) {
               childNode[":@"] = prefixedAttrs;
             }
             this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+            if (options.captureMetaData) {
+              currentNode.addEndIndex(result.closeIndex + 1);
+            }
             this.matcher.pop();
             this.isCurrentNodeStopNode = false;
             i2 = result.closeIndex;
@@ -89921,7 +90375,11 @@ var XMLParser = class {
    */
   parse(xmlData, validationOption) {
     if (typeof xmlData !== "string" && xmlData.toString) {
-      xmlData = xmlData.toString();
+      if (xmlData instanceof Uint8Array && !(typeof Buffer !== "undefined" && Buffer.isBuffer(xmlData))) {
+        xmlData = new TextDecoder("utf-8", { ignoreBOM: true }).decode(xmlData);
+      } else {
+        xmlData = xmlData.toString();
+      }
     } else if (typeof xmlData !== "string") {
       throw new Error("XML data is accepted in String or Bytes[] form.");
     }
@@ -90720,25 +91178,35 @@ var PropertyType;
   PropertyType2["Object"] = "object";
   PropertyType2["Original"] = "original";
 })(PropertyType || (PropertyType = {}));
+function stripPrefix(name2) {
+  const colonIdx = name2.indexOf(":");
+  return colonIdx === -1 ? name2 : name2.slice(colonIdx + 1);
+}
+function isXmlnsAttribute(name2) {
+  return name2 === "xmlns" || name2.startsWith("xmlns:");
+}
 function toJPathString(jPath) {
   if (typeof jPath === "string") {
     return jPath;
   }
-  return jPath.toString(".", false);
+  return jPath.toArray().map(stripPrefix).join(".");
 }
-function getParser({ attributeNamePrefix, attributeParsers, entityDecoder: entityDecoderOptions, tagParsers }) {
+function getParser({ attributeNamePrefix, attributeParsers, clarkNotationProps, entityDecoder: entityDecoderOptions, tagParsers }) {
   const parserOptions = {
     allowBooleanAttributes: true,
     attributeNamePrefix,
     textNodeName: "text",
     ignoreAttributes: false,
-    removeNSPrefix: true,
+    removeNSPrefix: !clarkNotationProps,
     jPath: false,
     numberParseOptions: {
       hex: true,
       leadingZeros: false
     },
-    attributeValueProcessor(_, attrValue, jPath) {
+    attributeValueProcessor(attrName, attrValue, jPath) {
+      if (attributeParsers.length === 0 || isXmlnsAttribute(attrName)) {
+        return attrValue;
+      }
       const pathStr = toJPathString(jPath);
       for (const processor of attributeParsers) {
         try {
@@ -90752,6 +91220,9 @@ function getParser({ attributeNamePrefix, attributeParsers, entityDecoder: entit
       return attrValue;
     },
     tagValueProcessor(tagName, tagValue, jPath) {
+      if (tagParsers.length === 0) {
+        return tagValue;
+      }
       const pathStr = toJPathString(jPath);
       for (const processor of tagParsers) {
         try {
@@ -90819,6 +91290,139 @@ function normaliseResult(result) {
   import_nested_property.default.set(output, "multistatus.response", import_nested_property.default.get(output, "multistatus.response").map((response) => normaliseResponse(response)));
   return output;
 }
+var STRUCTURAL_KEYS = /* @__PURE__ */ new Set([
+  "multistatus",
+  "response",
+  "propstat",
+  "prop",
+  "status",
+  "href",
+  "responsedescription"
+]);
+function isPlainObject2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function applyClarkNotation(root, attrPrefix) {
+  if (!isPlainObject2(root) && !Array.isArray(root))
+    return;
+  const xmlnsKey = `${attrPrefix}xmlns`;
+  const xmlnsPrefixedKey = `${xmlnsKey}:`;
+  const xmlnsPrefixedKeyLen = xmlnsPrefixedKey.length;
+  const TEXT_KEY = "text";
+  const EMPTY_SCOPE = /* @__PURE__ */ new Map();
+  function isXmlnsAttr(key) {
+    return key === xmlnsKey || key.length > xmlnsPrefixedKeyLen && key.startsWith(xmlnsPrefixedKey);
+  }
+  function extendScope(obj, parent) {
+    let scope = null;
+    for (const key of Object.keys(obj)) {
+      if (key === xmlnsKey) {
+        if (!scope)
+          scope = new Map(parent);
+        scope.set("", obj[key]);
+      } else if (key.length > xmlnsPrefixedKeyLen && key.startsWith(xmlnsPrefixedKey)) {
+        if (!scope)
+          scope = new Map(parent);
+        scope.set(key.slice(xmlnsPrefixedKeyLen), obj[key]);
+      }
+    }
+    return scope ?? parent;
+  }
+  function cleanPropValue(raw2) {
+    if (Array.isArray(raw2))
+      return raw2.map(cleanPropValue);
+    if (!isPlainObject2(raw2))
+      return raw2;
+    const out = {};
+    for (const key of Object.keys(raw2)) {
+      if (isXmlnsAttr(key))
+        continue;
+      out[key] = cleanPropValue(raw2[key]);
+    }
+    const keys = Object.keys(out);
+    if (keys.length === 0)
+      return "";
+    if (keys.length === 1 && keys[0] === TEXT_KEY)
+      return out[TEXT_KEY];
+    return out;
+  }
+  function emitClarkForChild(rawKey, rawValue, scope, out) {
+    const colonIdx = rawKey.indexOf(":");
+    const prefix = colonIdx === -1 ? "" : rawKey.slice(0, colonIdx);
+    const local = colonIdx === -1 ? rawKey : rawKey.slice(colonIdx + 1);
+    const resolveNs = (value) => {
+      const ownScope = isPlainObject2(value) ? extendScope(value, scope) : scope;
+      return ownScope.get(prefix) ?? "";
+    };
+    const assign2 = (ns, value) => {
+      const key = ns ? `{${ns}}${local}` : local;
+      const existing = out[key];
+      if (existing === void 0) {
+        out[key] = value;
+      } else if (Array.isArray(existing)) {
+        existing.push(value);
+      } else {
+        out[key] = [existing, value];
+      }
+    };
+    if (Array.isArray(rawValue)) {
+      for (const item of rawValue) {
+        assign2(resolveNs(item), cleanPropValue(item));
+      }
+      return;
+    }
+    assign2(resolveNs(rawValue), cleanPropValue(rawValue));
+  }
+  function rewritePropToClark(propObj, parentScope) {
+    const scope = extendScope(propObj, parentScope);
+    const out = {};
+    for (const key of Object.keys(propObj)) {
+      if (isXmlnsAttr(key))
+        continue;
+      emitClarkForChild(key, propObj[key], scope, out);
+    }
+    return out;
+  }
+  function rewriteProp(value, parentScope) {
+    if (!isPlainObject2(value))
+      return value;
+    const rewritten = rewritePropToClark(value, parentScope);
+    return Object.keys(rewritten).length === 0 ? "" : rewritten;
+  }
+  function walk3(node, scope) {
+    if (Array.isArray(node)) {
+      for (let index2 = 0; index2 < node.length; index2 += 1) {
+        node[index2] = walk3(node[index2], scope);
+      }
+      return node;
+    }
+    if (!isPlainObject2(node))
+      return node;
+    const childScope = extendScope(node, scope);
+    for (const key of Object.keys(node)) {
+      if (isXmlnsAttr(key)) {
+        delete node[key];
+        continue;
+      }
+      const colonIdx = key.indexOf(":");
+      const ln = colonIdx === -1 ? key : key.slice(colonIdx + 1);
+      const value = node[key];
+      let actualKey = key;
+      if (STRUCTURAL_KEYS.has(ln) && ln !== key) {
+        delete node[key];
+        node[ln] = value;
+        actualKey = ln;
+      }
+      if (ln === "prop") {
+        node[actualKey] = Array.isArray(value) ? value.map((item) => rewriteProp(item, childScope)) : rewriteProp(value, childScope);
+      } else {
+        node[actualKey] = walk3(value, childScope);
+      }
+    }
+    return Object.keys(node).length === 0 ? "" : node;
+  }
+  walk3(root, EMPTY_SCOPE);
+}
 function parseXML(xml, context) {
   context = context ?? {
     attributeNamePrefix: "@",
@@ -90827,6 +91431,9 @@ function parseXML(xml, context) {
   };
   return new Promise((resolve3) => {
     const result = getParser(context).parse(xml);
+    if (context.clarkNotationProps) {
+      applyClarkNotation(result, context.attributeNamePrefix ?? "@");
+    }
     resolve3(normaliseResult(result));
   });
 }

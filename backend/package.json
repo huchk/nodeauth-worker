@@ -1,6 +1,6 @@
 {
   "name": "nodeauth-backend-worker",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "NodeAuth Backend Runtime Dependencies (Distribution Version)",
   "private": true,
   "type": "module",
@@ -19,7 +19,7 @@
     "hono": "4.13.7",
     "mysql2": "3.24.4",
     "node-cron": "4.2.1",
-    "nodemailer": "10.0.5",
+    "nodemailer": "10.0.16",
     "pg": "8.20.0",
     "viem": "2.47.6",
     "webdav": "5.9.0"

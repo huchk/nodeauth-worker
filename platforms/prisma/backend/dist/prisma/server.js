@@ -70815,8 +70815,10 @@ async function batchInsertVaultItems(dbClient, items, key, createdBy, startSortO
       deletedAt: item.deletedAt ?? item.deleted_at ?? null,
       createdAt: Date.now(),
       // camelCase 匹配 Drizzle schema
-      createdBy
+      createdBy,
       // camelCase 匹配 Drizzle schema
+      updatedAt: Date.now(),
+      updatedBy: createdBy
     };
   }));
   if (typeof dbClient.batch === "function") {
@@ -71107,6 +71109,7 @@ var VaultService = class {
     }
     const encryptedSecret = await encryptField(secret, this.encryptionKey);
     const maxSort = await this.repository.getMaxSortOrder();
+    const now = Date.now();
     const created = await this.repository.create({
       id: crypto.randomUUID(),
       service,
@@ -71119,8 +71122,10 @@ var VaultService = class {
       period,
       counter,
       sortOrder: maxSort + 1,
-      createdAt: Date.now(),
-      createdBy: userId
+      createdAt: now,
+      createdBy: userId,
+      updatedAt: now,
+      updatedBy: userId
     });
     const { createdBy: _c, updatedBy: _u, ...restCreated } = created;
     return {
@@ -71534,7 +71539,8 @@ var TrashService = class {
     if (existing.deletedAt !== null) {
       return { success: true };
     }
-    await this.repository.update(id, { deletedAt: Date.now() });
+    const now = Date.now();
+    await this.repository.update(id, { deletedAt: now, updatedAt: now });
     return { success: true };
   }
   /**
@@ -71568,7 +71574,8 @@ var TrashService = class {
     }
     await this.repository.update(id, {
       deletedAt: null,
-      sortOrder: nextSortOrder
+      sortOrder: nextSortOrder,
+      updatedAt: Date.now()
     });
     return { success: true };
   }
@@ -71604,7 +71611,7 @@ var TrashService = class {
     if (clientTimestamp < 0 || clientTimestamp > now + 3e5) {
       deletedAt = now;
     }
-    await this.repository.update(id, { deletedAt });
+    await this.repository.update(id, { deletedAt, updatedAt: now });
     return { success: true };
   }
 };
@@ -71636,8 +71643,9 @@ var VaultRepository = class {
       return [];
     }
     const baseQuery = this.db.select().from(vault4);
-    const queryWithWhere = sinceTimestamp && sinceTimestamp > 0 ? baseQuery.where(sql`${vault4.updatedAt} > ${sinceTimestamp}`) : baseQuery;
-    return await queryWithWhere.orderBy(desc(vault4.updatedAt)).limit(limitVal).offset(offsetVal);
+    const effectiveUpdatedAt = sql`coalesce(${vault4.updatedAt}, ${vault4.createdAt})`;
+    const queryWithWhere = sinceTimestamp && sinceTimestamp > 0 ? baseQuery.where(sql`${effectiveUpdatedAt} > ${sinceTimestamp}`) : baseQuery;
+    return await queryWithWhere.orderBy(desc(effectiveUpdatedAt)).limit(limitVal).offset(offsetVal);
   }
   /**
    * 获取当前最大排序值
@@ -71922,7 +71930,7 @@ var VaultRepository = class {
     const BATCH = 50;
     for (let i2 = 0; i2 < ids.length; i2 += BATCH) {
       const chunk = ids.slice(i2, i2 + BATCH);
-      await this.db.update(vault4).set({ deletedAt: timestamp3, sortOrder: 0 }).where(inArray(vault4.id, chunk));
+      await this.db.update(vault4).set({ deletedAt: timestamp3, sortOrder: 0, updatedAt: timestamp3 }).where(inArray(vault4.id, chunk));
       count += chunk.length;
     }
     return count;
@@ -72933,6 +72941,57 @@ function generateBasicAuthHeader(username, password) {
 function generateTokenAuthHeader(token) {
   return `${token.token_type} ${token.access_token}`;
 }
+
+// node_modules/webdav/dist/node/types.js
+var AuthType;
+(function(AuthType2) {
+  AuthType2["Auto"] = "auto";
+  AuthType2["Digest"] = "digest";
+  AuthType2["None"] = "none";
+  AuthType2["Password"] = "password";
+  AuthType2["Token"] = "token";
+})(AuthType || (AuthType = {}));
+var ErrorCode;
+(function(ErrorCode2) {
+  ErrorCode2["DataTypeNoLength"] = "data-type-no-length";
+  ErrorCode2["InvalidAuthType"] = "invalid-auth-type";
+  ErrorCode2["InvalidOutputFormat"] = "invalid-output-format";
+  ErrorCode2["LinkUnsupportedAuthType"] = "link-unsupported-auth";
+  ErrorCode2["InvalidUpdateRange"] = "invalid-update-range";
+  ErrorCode2["NotSupported"] = "not-supported";
+})(ErrorCode || (ErrorCode = {}));
+
+// node_modules/webdav/dist/node/auth/index.js
+function setupAuth(context, username, password, oauthToken, ha1) {
+  switch (context.authType) {
+    case AuthType.Auto:
+      if (username && password) {
+        context.headers.Authorization = generateBasicAuthHeader(username, password);
+      }
+      break;
+    case AuthType.Digest:
+      context.digest = createDigestContext(username, password, ha1);
+      break;
+    case AuthType.None:
+      break;
+    case AuthType.Password:
+      context.headers.Authorization = generateBasicAuthHeader(username, password);
+      break;
+    case AuthType.Token:
+      context.headers.Authorization = generateTokenAuthHeader(oauthToken);
+      break;
+    default:
+      throw new Layerr({
+        info: {
+          code: ErrorCode.InvalidAuthType
+        }
+      }, `Invalid auth type: ${context.authType}`);
+  }
+}
+
+// node_modules/webdav/dist/node/request.js
+import { Agent as HTTPAgent } from "http";
+import { Agent as HTTPSAgent } from "https";
 
 // node_modules/node-fetch/src/index.js
 import http3 from "node:http";
@@ -74215,57 +74274,6 @@ function fixResponseChunkedTransferBadEnding(request2, errorCallback) {
   });
 }
 
-// node_modules/webdav/dist/node/types.js
-var AuthType;
-(function(AuthType2) {
-  AuthType2["Auto"] = "auto";
-  AuthType2["Digest"] = "digest";
-  AuthType2["None"] = "none";
-  AuthType2["Password"] = "password";
-  AuthType2["Token"] = "token";
-})(AuthType || (AuthType = {}));
-var ErrorCode;
-(function(ErrorCode2) {
-  ErrorCode2["DataTypeNoLength"] = "data-type-no-length";
-  ErrorCode2["InvalidAuthType"] = "invalid-auth-type";
-  ErrorCode2["InvalidOutputFormat"] = "invalid-output-format";
-  ErrorCode2["LinkUnsupportedAuthType"] = "link-unsupported-auth";
-  ErrorCode2["InvalidUpdateRange"] = "invalid-update-range";
-  ErrorCode2["NotSupported"] = "not-supported";
-})(ErrorCode || (ErrorCode = {}));
-
-// node_modules/webdav/dist/node/auth/index.js
-function setupAuth(context, username, password, oauthToken, ha1) {
-  switch (context.authType) {
-    case AuthType.Auto:
-      if (username && password) {
-        context.headers.Authorization = generateBasicAuthHeader(username, password);
-      }
-      break;
-    case AuthType.Digest:
-      context.digest = createDigestContext(username, password, ha1);
-      break;
-    case AuthType.None:
-      break;
-    case AuthType.Password:
-      context.headers.Authorization = generateBasicAuthHeader(username, password);
-      break;
-    case AuthType.Token:
-      context.headers.Authorization = generateTokenAuthHeader(oauthToken);
-      break;
-    default:
-      throw new Layerr({
-        info: {
-          code: ErrorCode.InvalidAuthType
-        }
-      }, `Invalid auth type: ${context.authType}`);
-  }
-}
-
-// node_modules/webdav/dist/node/request.js
-import { Agent as HTTPAgent } from "http";
-import { Agent as HTTPSAgent } from "https";
-
 // node_modules/hot-patcher/dist/functions.js
 function sequence(...methods) {
   if (methods.length === 0) {
@@ -74544,9 +74552,9 @@ function mergeObjects(obj1, obj2) {
 // node_modules/webdav/dist/node/tools/headers.js
 function convertResponseHeaders(headers) {
   const output = {};
-  for (const key of headers.keys()) {
-    output[key] = headers.get(key);
-  }
+  headers.forEach((value, key) => {
+    output[key] = value;
+  });
   return output;
 }
 function mergeHeaders(...headerPayloads) {
@@ -74791,6 +74799,8 @@ var commaPattern = /\\,/g;
 var periodPattern = /\\\./g;
 var EXPANSION_MAX = 1e5;
 var EXPANSION_MAX_LENGTH = 4e6;
+var EXPANSION_MAX_DEPTH = 1e3;
+var EXPANSION_MAX_REWRITES = 1e3;
 function numeric3(str) {
   return !isNaN(str) ? parseInt(str, 10) : str.charCodeAt(0);
 }
@@ -74800,36 +74810,44 @@ function escapeBraces(str) {
 function unescapeBraces(str) {
   return str.replace(escSlashPattern, "\\").replace(escOpenPattern, "{").replace(escClosePattern, "}").replace(escCommaPattern, ",").replace(escPeriodPattern, ".");
 }
+function pushAll(target, items) {
+  for (let i2 = 0; i2 < items.length; i2++) {
+    target.push(items[i2]);
+  }
+}
 function parseCommaParts(str) {
-  if (!str) {
-    return [""];
-  }
   const parts = [];
-  const m2 = balanced("{", "}", str);
-  if (!m2) {
-    return str.split(",");
+  let carry = "";
+  for (; ; ) {
+    const m2 = balanced("{", "}", str);
+    if (!m2) {
+      const tail = str.split(",");
+      tail[0] = carry + tail[0];
+      pushAll(parts, tail);
+      return parts;
+    }
+    const { pre, body, post } = m2;
+    const p = pre.split(",");
+    p[0] = carry + p[0];
+    p[p.length - 1] += "{" + body + "}";
+    if (!post.length) {
+      pushAll(parts, p);
+      return parts;
+    }
+    carry = p.pop();
+    pushAll(parts, p);
+    str = post;
   }
-  const { pre, body, post } = m2;
-  const p = pre.split(",");
-  p[p.length - 1] += "{" + body + "}";
-  const postParts = parseCommaParts(post);
-  if (post.length) {
-    ;
-    p[p.length - 1] += postParts.shift();
-    p.push.apply(p, postParts);
-  }
-  parts.push.apply(parts, p);
-  return parts;
 }
 function expand(str, options = {}) {
   if (!str) {
     return [];
   }
-  const { max = EXPANSION_MAX, maxLength = EXPANSION_MAX_LENGTH } = options;
+  const { max = EXPANSION_MAX, maxLength = EXPANSION_MAX_LENGTH, maxDepth = EXPANSION_MAX_DEPTH, maxRewrites = EXPANSION_MAX_REWRITES } = options;
   if (str.slice(0, 2) === "{}") {
     str = "\\{\\}" + str.slice(2);
   }
-  return expand_(escapeBraces(str), max, maxLength, true).map(unescapeBraces);
+  return expand_(escapeBraces(str), max, maxLength, maxDepth, 0, maxRewrites, true).map(unescapeBraces);
 }
 function embrace(str) {
   return "{" + str + "}";
@@ -74907,8 +74925,12 @@ function expandSequence(body, isAlphaSequence, max, maxLength) {
   }
   return N;
 }
-function expand_(str, max, maxLength, isTop) {
+function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
+  if (depth > maxDepth) {
+    return [str];
+  }
   let acc = [""];
+  let rewrites = 0;
   let dropEmpties = false;
   let firstGroup = true;
   for (; ; ) {
@@ -74930,7 +74952,8 @@ function expand_(str, max, maxLength, isTop) {
     const isSequence = isNumericSequence || isAlphaSequence;
     const isOptions = m2.body.indexOf(",") >= 0;
     if (!isSequence && !isOptions) {
-      if (m2.post.match(/,(?!,).*\}/)) {
+      if (rewrites < maxRewrites && m2.post.match(/,(?!,).*\}/)) {
+        rewrites++;
         str = m2.pre + "{" + m2.body + escClose + m2.post;
         isTop = true;
         continue;
@@ -74947,7 +74970,7 @@ function expand_(str, max, maxLength, isTop) {
     } else {
       let n = parseCommaParts(m2.body);
       if (n.length === 1 && n[0] !== void 0) {
-        n = expand_(n[0], max, maxLength, false).map(embrace);
+        n = expand_(n[0], max, maxLength, maxDepth, depth + 1, maxRewrites, false).map(embrace);
         if (n.length === 1) {
           acc = combine(acc, pre + n[0], [""], max, maxLength, dropEmpties && !m2.post.length);
           if (!m2.post.length)
@@ -74965,7 +74988,7 @@ function expand_(str, max, maxLength, isTop) {
       values = [];
       let valuesLength = 0;
       outer: for (let j = 0; j < n.length; j++) {
-        const expanded = expand_(n[j], max, maxLength, false);
+        const expanded = expand_(n[j], max, maxLength, maxDepth, depth + 1, maxRewrites, false);
         for (let k = 0; k < expanded.length; k++) {
           const v = expanded[k];
           if (dropsEmpties && !v)
@@ -76903,9 +76926,55 @@ function readAttributeStr(xmlData, i2) {
     tagClosed
   };
 }
-var validAttrStrRegxp = new RegExp(`(\\s*)([^\\s=]+)(\\s*=)?(\\s*(['"])(([\\s\\S])*?)\\5)?`, "g");
+function scanAttributeTokens(attrStr) {
+  const tokens = [];
+  const len = attrStr.length;
+  let i2 = 0;
+  while (i2 < len) {
+    const tokenStart = i2;
+    while (i2 < len && isWhiteSpace(attrStr[i2])) i2++;
+    if (i2 >= len) break;
+    if (attrStr[i2] === "=") {
+      i2 = tokenStart + 1;
+      continue;
+    }
+    const leadingWs = attrStr.slice(tokenStart, i2);
+    const nameStart = i2;
+    while (i2 < len && !isWhiteSpace(attrStr[i2]) && attrStr[i2] !== "=") i2++;
+    const name = attrStr.slice(nameStart, i2);
+    let equalsGroup;
+    let j = i2;
+    while (j < len && isWhiteSpace(attrStr[j])) j++;
+    if (j < len && attrStr[j] === "=") {
+      equalsGroup = attrStr.slice(i2, j + 1);
+      i2 = j + 1;
+    }
+    let quoteChar;
+    let value;
+    let k = i2;
+    while (k < len && isWhiteSpace(attrStr[k])) k++;
+    if (k < len && (attrStr[k] === '"' || attrStr[k] === "'")) {
+      const valueStart = k + 1;
+      const closeIdx = attrStr.indexOf(attrStr[k], valueStart);
+      if (closeIdx !== -1) {
+        quoteChar = attrStr[k];
+        value = attrStr.slice(valueStart, closeIdx);
+        i2 = closeIdx + 1;
+      }
+    }
+    const token = { startIndex: tokenStart };
+    token[1] = leadingWs;
+    token[2] = name;
+    token[3] = equalsGroup;
+    token[4] = quoteChar !== void 0 ? true : void 0;
+    token[5] = quoteChar;
+    token[6] = value;
+    tokens.push(token);
+  }
+  return tokens;
+}
 function validateAttributeString(attrStr, options) {
-  const matches = getAllMatches(attrStr, validAttrStrRegxp);
+  const matches = scanAttributeTokens(attrStr);
   const attrNames = {};
   for (let i2 = 0; i2 < matches.length; i2++) {
     if (matches[i2][1].length === 0) {
@@ -77638,8 +77707,17 @@ var XmlNode = class {
     } else {
       this.child.push({ [node.tagname]: node.child });
     }
+    this.addStartIndex(startIndex);
+  }
+  addStartIndex(startIndex) {
     if (startIndex !== void 0) {
       this.child[this.child.length - 1][METADATA_SYMBOL] = { startIndex };
+    }
+  }
+  addEndIndex(endIndex) {
+    const lastChild = this.child[this.child.length - 1];
+    if (lastChild !== void 0 && lastChild[METADATA_SYMBOL] !== void 0 && lastChild[METADATA_SYMBOL].endIndex === void 0) {
+      lastChild[METADATA_SYMBOL].endIndex = endIndex;
     }
   }
   /** symbol used for metadata */
@@ -77693,8 +77771,19 @@ var DocTypeReader = class {
       i2 = i2 + 9;
       let angleBracketsCount = 1;
       let hasBody = false, comment = false;
+      let quoteChar = null;
       let exp = "";
       for (; i2 < xmlData.length; i2++) {
+        if (quoteChar !== null) {
+          if (xmlData[i2] === quoteChar) quoteChar = null;
+          exp += xmlData[i2];
+          continue;
+        }
+        if (!hasBody && !comment && (xmlData[i2] === '"' || xmlData[i2] === "'")) {
+          quoteChar = xmlData[i2];
+          exp += xmlData[i2];
+          continue;
+        }
         if (xmlData[i2] === "<" && !comment) {
           if (hasBody && hasSeq(xmlData, "!ENTITY", i2)) {
             i2 += 7;
@@ -77741,7 +77830,7 @@ var DocTypeReader = class {
           exp += xmlData[i2];
         }
       }
-      if (angleBracketsCount !== 0) {
+      if (quoteChar !== null || angleBracketsCount !== 0) {
         throw new Error(`Unclosed DOCTYPE`);
       }
     } else {
@@ -78288,7 +78377,9 @@ function resolveEnotation(str, trimmedStr, options) {
 }
 function trimZeros(numStr) {
   if (numStr && numStr.indexOf(".") !== -1) {
-    numStr = numStr.replace(/0+$/, "");
+    let end = numStr.length;
+    while (end > 0 && numStr.charCodeAt(end - 1) === 48) end--;
+    numStr = numStr.slice(0, end);
     if (numStr === ".") numStr = "0";
     else if (numStr[0] === ".") numStr = "0" + numStr;
     else if (numStr[numStr.length - 1] === ".") numStr = numStr.substring(0, numStr.length - 1);
@@ -80136,7 +80227,10 @@ var parseXml = function(xmlData) {
         }
         this.matcher.pop();
         this.isCurrentNodeStopNode = false;
-        currentNode = this.tagsNodeStack.pop();
+        currentNode = this.tagsNodeStack.pop() || xmlObj;
+        if (options.captureMetaData && currentNode) {
+          currentNode.addEndIndex(closeIndex + 1);
+        }
         textData = "";
         i2 = closeIndex;
       } else if (c1 === 63) {
@@ -80157,6 +80251,9 @@ var parseXml = function(xmlData) {
             childNode[":@"] = attsMap;
           }
           this.addChild(currentNode, childNode, this.readonlyMatcher, i2);
+          if (options.captureMetaData) {
+            currentNode.addEndIndex(tagData.closeIndex + 2);
+          }
         }
         i2 = tagData.closeIndex + 1;
       } else if (c1 === 33 && xmlData.charCodeAt(i2 + 2) === 45 && xmlData.charCodeAt(i2 + 3) === 45) {
@@ -80258,6 +80355,9 @@ var parseXml = function(xmlData) {
           this.matcher.pop();
           this.isCurrentNodeStopNode = false;
           this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+          if (options.captureMetaData) {
+            currentNode.addEndIndex(i2 + 1);
+          }
         } else {
           if (isSelfClosing) {
             ({ tagName, tagExp } = transformTagName(options.transformTagName, tagName, tagExp, options));
@@ -80266,6 +80366,9 @@ var parseXml = function(xmlData) {
               childNode[":@"] = prefixedAttrs;
             }
             this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+            if (options.captureMetaData) {
+              currentNode.addEndIndex(closeIndex + 1);
+            }
             this.matcher.pop();
             this.isCurrentNodeStopNode = false;
           } else if (options.unpairedTagsSet.has(tagName)) {
@@ -80274,6 +80377,9 @@ var parseXml = function(xmlData) {
               childNode[":@"] = prefixedAttrs;
             }
             this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+            if (options.captureMetaData) {
+              currentNode.addEndIndex(result.closeIndex + 1);
+            }
             this.matcher.pop();
             this.isCurrentNodeStopNode = false;
             i2 = result.closeIndex;
@@ -80624,7 +80730,11 @@ var XMLParser = class {
    */
   parse(xmlData, validationOption) {
     if (typeof xmlData !== "string" && xmlData.toString) {
-      xmlData = xmlData.toString();
+      if (xmlData instanceof Uint8Array && !(typeof Buffer !== "undefined" && Buffer.isBuffer(xmlData))) {
+        xmlData = new TextDecoder("utf-8", { ignoreBOM: true }).decode(xmlData);
+      } else {
+        xmlData = xmlData.toString();
+      }
     } else if (typeof xmlData !== "string") {
       throw new Error("XML data is accepted in String or Bytes[] form.");
     }
@@ -81423,25 +81533,35 @@ var PropertyType;
   PropertyType2["Object"] = "object";
   PropertyType2["Original"] = "original";
 })(PropertyType || (PropertyType = {}));
+function stripPrefix(name) {
+  const colonIdx = name.indexOf(":");
+  return colonIdx === -1 ? name : name.slice(colonIdx + 1);
+}
+function isXmlnsAttribute(name) {
+  return name === "xmlns" || name.startsWith("xmlns:");
+}
 function toJPathString(jPath) {
   if (typeof jPath === "string") {
     return jPath;
   }
-  return jPath.toString(".", false);
+  return jPath.toArray().map(stripPrefix).join(".");
 }
-function getParser({ attributeNamePrefix, attributeParsers, entityDecoder: entityDecoderOptions, tagParsers }) {
+function getParser({ attributeNamePrefix, attributeParsers, clarkNotationProps, entityDecoder: entityDecoderOptions, tagParsers }) {
   const parserOptions = {
     allowBooleanAttributes: true,
     attributeNamePrefix,
     textNodeName: "text",
     ignoreAttributes: false,
-    removeNSPrefix: true,
+    removeNSPrefix: !clarkNotationProps,
     jPath: false,
     numberParseOptions: {
       hex: true,
       leadingZeros: false
     },
-    attributeValueProcessor(_, attrValue, jPath) {
+    attributeValueProcessor(attrName, attrValue, jPath) {
+      if (attributeParsers.length === 0 || isXmlnsAttribute(attrName)) {
+        return attrValue;
+      }
       const pathStr = toJPathString(jPath);
       for (const processor of attributeParsers) {
         try {
@@ -81455,6 +81575,9 @@ function getParser({ attributeNamePrefix, attributeParsers, entityDecoder: entit
       return attrValue;
     },
     tagValueProcessor(tagName, tagValue, jPath) {
+      if (tagParsers.length === 0) {
+        return tagValue;
+      }
       const pathStr = toJPathString(jPath);
       for (const processor of tagParsers) {
         try {
@@ -81522,6 +81645,139 @@ function normaliseResult(result) {
   import_nested_property.default.set(output, "multistatus.response", import_nested_property.default.get(output, "multistatus.response").map((response) => normaliseResponse(response)));
   return output;
 }
+var STRUCTURAL_KEYS = /* @__PURE__ */ new Set([
+  "multistatus",
+  "response",
+  "propstat",
+  "prop",
+  "status",
+  "href",
+  "responsedescription"
+]);
+function isPlainObject2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function applyClarkNotation(root, attrPrefix) {
+  if (!isPlainObject2(root) && !Array.isArray(root))
+    return;
+  const xmlnsKey = `${attrPrefix}xmlns`;
+  const xmlnsPrefixedKey = `${xmlnsKey}:`;
+  const xmlnsPrefixedKeyLen = xmlnsPrefixedKey.length;
+  const TEXT_KEY = "text";
+  const EMPTY_SCOPE = /* @__PURE__ */ new Map();
+  function isXmlnsAttr(key) {
+    return key === xmlnsKey || key.length > xmlnsPrefixedKeyLen && key.startsWith(xmlnsPrefixedKey);
+  }
+  function extendScope(obj, parent) {
+    let scope = null;
+    for (const key of Object.keys(obj)) {
+      if (key === xmlnsKey) {
+        if (!scope)
+          scope = new Map(parent);
+        scope.set("", obj[key]);
+      } else if (key.length > xmlnsPrefixedKeyLen && key.startsWith(xmlnsPrefixedKey)) {
+        if (!scope)
+          scope = new Map(parent);
+        scope.set(key.slice(xmlnsPrefixedKeyLen), obj[key]);
+      }
+    }
+    return scope ?? parent;
+  }
+  function cleanPropValue(raw2) {
+    if (Array.isArray(raw2))
+      return raw2.map(cleanPropValue);
+    if (!isPlainObject2(raw2))
+      return raw2;
+    const out = {};
+    for (const key of Object.keys(raw2)) {
+      if (isXmlnsAttr(key))
+        continue;
+      out[key] = cleanPropValue(raw2[key]);
+    }
+    const keys = Object.keys(out);
+    if (keys.length === 0)
+      return "";
+    if (keys.length === 1 && keys[0] === TEXT_KEY)
+      return out[TEXT_KEY];
+    return out;
+  }
+  function emitClarkForChild(rawKey, rawValue, scope, out) {
+    const colonIdx = rawKey.indexOf(":");
+    const prefix = colonIdx === -1 ? "" : rawKey.slice(0, colonIdx);
+    const local = colonIdx === -1 ? rawKey : rawKey.slice(colonIdx + 1);
+    const resolveNs = (value) => {
+      const ownScope = isPlainObject2(value) ? extendScope(value, scope) : scope;
+      return ownScope.get(prefix) ?? "";
+    };
+    const assign = (ns, value) => {
+      const key = ns ? `{${ns}}${local}` : local;
+      const existing = out[key];
+      if (existing === void 0) {
+        out[key] = value;
+      } else if (Array.isArray(existing)) {
+        existing.push(value);
+      } else {
+        out[key] = [existing, value];
+      }
+    };
+    if (Array.isArray(rawValue)) {
+      for (const item of rawValue) {
+        assign(resolveNs(item), cleanPropValue(item));
+      }
+      return;
+    }
+    assign(resolveNs(rawValue), cleanPropValue(rawValue));
+  }
+  function rewritePropToClark(propObj, parentScope) {
+    const scope = extendScope(propObj, parentScope);
+    const out = {};
+    for (const key of Object.keys(propObj)) {
+      if (isXmlnsAttr(key))
+        continue;
+      emitClarkForChild(key, propObj[key], scope, out);
+    }
+    return out;
+  }
+  function rewriteProp(value, parentScope) {
+    if (!isPlainObject2(value))
+      return value;
+    const rewritten = rewritePropToClark(value, parentScope);
+    return Object.keys(rewritten).length === 0 ? "" : rewritten;
+  }
+  function walk3(node, scope) {
+    if (Array.isArray(node)) {
+      for (let index2 = 0; index2 < node.length; index2 += 1) {
+        node[index2] = walk3(node[index2], scope);
+      }
+      return node;
+    }
+    if (!isPlainObject2(node))
+      return node;
+    const childScope = extendScope(node, scope);
+    for (const key of Object.keys(node)) {
+      if (isXmlnsAttr(key)) {
+        delete node[key];
+        continue;
+      }
+      const colonIdx = key.indexOf(":");
+      const ln = colonIdx === -1 ? key : key.slice(colonIdx + 1);
+      const value = node[key];
+      let actualKey = key;
+      if (STRUCTURAL_KEYS.has(ln) && ln !== key) {
+        delete node[key];
+        node[ln] = value;
+        actualKey = ln;
+      }
+      if (ln === "prop") {
+        node[actualKey] = Array.isArray(value) ? value.map((item) => rewriteProp(item, childScope)) : rewriteProp(value, childScope);
+      } else {
+        node[actualKey] = walk3(value, childScope);
+      }
+    }
+    return Object.keys(node).length === 0 ? "" : node;
+  }
+  walk3(root, EMPTY_SCOPE);
+}
 function parseXML(xml, context) {
   context = context ?? {
     attributeNamePrefix: "@",
@@ -81530,6 +81786,9 @@ function parseXML(xml, context) {
   };
   return new Promise((resolve) => {
     const result = getParser(context).parse(xml);
+    if (context.clarkNotationProps) {
+      applyClarkNotation(result, context.attributeNamePrefix ?? "@");
+    }
     resolve(normaliseResult(result));
   });
 }
